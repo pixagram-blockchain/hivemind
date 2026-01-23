@@ -6,6 +6,7 @@ from pathlib import Path
 from hive.conf import SCHEMA_NAME, SCHEMA_OWNER_NAME
 from hive.indexer.hive_db.haf_functions import prepare_app_context
 from hive.version import GIT_DATE, GIT_REVISION, VERSION
+from hive.utils.chain import sql_template_vars
 
 log = logging.getLogger(__name__)
 
@@ -510,6 +511,8 @@ def execute_sql_script(query_executor, path_to_script):
         with open(path_to_script) as sql_script_file:
             sql_script = sql_script_file.read()
         if sql_script is not None:
+            for key, value in sql_template_vars().items():
+                sql_script = sql_script.replace(f"{{{{{key}}}}}", value)
             return query_executor(sql_script)
     except Exception as ex:
         log.exception(f"Error running sql script: {ex}")

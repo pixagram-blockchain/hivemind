@@ -1,5 +1,5 @@
 DROP TYPE IF EXISTS hivemind_postgrest_utilities.currency CASCADE;
-CREATE TYPE hivemind_postgrest_utilities.currency AS ENUM( 'HBD', 'HIVE', 'VESTS');
+CREATE TYPE hivemind_postgrest_utilities.currency AS ENUM( '{{HBD_SYMBOL}}', '{{HIVE_SYMBOL}}', '{{VESTS_SYMBOL}}');
 
 DROP TABLE IF EXISTS hivemind_postgrest_utilities.nai_currency_map;
 CREATE TABLE hivemind_postgrest_utilities.nai_currency_map
@@ -8,7 +8,7 @@ CREATE TABLE hivemind_postgrest_utilities.nai_currency_map
   nai TEXT NOT NULL,
   precision INT NOT NULL
 );
-INSERT INTO hivemind_postgrest_utilities.nai_currency_map VALUES ('HBD','@@000000013', 3), ('HIVE','@@000000021', 3), ('VESTS','@@000000037', 3);
+INSERT INTO hivemind_postgrest_utilities.nai_currency_map VALUES ('{{HBD_SYMBOL}}','@@000000013', 3), ('{{HIVE_SYMBOL}}','@@000000021', 3), ('{{VESTS_SYMBOL}}','@@000000037', 3);
 
 
 DROP FUNCTION IF EXISTS hivemind_postgrest_utilities.to_nai;
@@ -50,9 +50,13 @@ DECLARE
   _result RECORD;
 BEGIN                                                        
   IF _currency_as_text = 'SBD' THEN
-      _currency_as_text = 'HBD';
+      _currency_as_text = '{{HBD_SYMBOL}}';
   ELSIF _currency_as_text = 'STEEM' THEN
-      _currency_as_text = 'HIVE';
+      _currency_as_text = '{{HIVE_SYMBOL}}';
+  ELSIF _currency_as_text = 'HBD' THEN
+      _currency_as_text = '{{HBD_SYMBOL}}';
+  ELSIF _currency_as_text = 'HIVE' THEN
+      _currency_as_text = '{{HIVE_SYMBOL}}';
   END IF;                                                                         
   _amount = split_part(_value, ' ', 1)::NUMERIC;
   SELECT _amount, hivemind_postgrest_utilities.currency(_currency_as_text) INTO _result;

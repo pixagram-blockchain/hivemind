@@ -29,7 +29,7 @@ BEGIN
     'last_update', to_jsonb(hivemind_postgrest_utilities.json_date(_row.updated_at)),
     'depth', _row.depth,
     'children', _row.children,
-    'curator_payout_value', '0.000 HBD',
+    'curator_payout_value', '0.000 {{HBD_SYMBOL}}',
     'replies', to_jsonb('{}'::INT[]),
     'body_length', LENGTH(_row.body),
     'author_reputation', _row.author_rep,
@@ -50,18 +50,18 @@ BEGIN
     _result = jsonb_set(_result, '{reblogged_by}', to_jsonb(_reblogged_by));
   END IF;
 
-  -- afaik in all cases when currency is not HBD, assert is thrown in python code, so currency type is always HBD.
+  -- currency is expected to be the stable token (asserted in python code)
   IF _row.is_paidout THEN
     _result = jsonb_set(_result, '{last_payout}', to_jsonb(hivemind_postgrest_utilities.json_date(_row.payout_at)));
     _result = jsonb_set(_result, '{cashout_time}', to_jsonb(hivemind_postgrest_utilities.json_date()));
-    _result = jsonb_set(_result, '{pending_payout_value}', to_jsonb('0.000 HBD'::text));
-    _result = jsonb_set(_result, '{total_payout_value}', to_jsonb(_row.payout || ' HBD'));
+    _result = jsonb_set(_result, '{pending_payout_value}', to_jsonb('0.000 {{HBD_SYMBOL}}'::text));
+    _result = jsonb_set(_result, '{total_payout_value}', to_jsonb(_row.payout || ' {{HBD_SYMBOL}}'));
   ELSE
     _result = jsonb_set(_result, '{last_payout}', to_jsonb(hivemind_postgrest_utilities.json_date()));
     _result = jsonb_set(_result, '{cashout_time}', to_jsonb(hivemind_postgrest_utilities.json_date(_row.payout_at)));
     _tmp_amount = _row.payout + _row.pending_payout;
-    _result = jsonb_set(_result, '{pending_payout_value}', to_jsonb(_tmp_amount || ' HBD'));
-    _result = jsonb_set(_result, '{total_payout_value}', to_jsonb('0.000 HBD'::text));
+    _result = jsonb_set(_result, '{pending_payout_value}', to_jsonb(_tmp_amount || ' {{HBD_SYMBOL}}'));
+    _result = jsonb_set(_result, '{total_payout_value}', to_jsonb('0.000 {{HBD_SYMBOL}}'::text));
   END IF;
 
   IF _content_additions THEN
@@ -69,10 +69,10 @@ BEGIN
     _result = jsonb_set(_result, '{max_cashout_time}', to_jsonb(hivemind_postgrest_utilities.json_date()));
 
     SELECT amount, currency FROM hivemind_postgrest_utilities.parse_asset(_row.curator_payout_value) AS (amount NUMERIC, currency hivemind_postgrest_utilities.currency) INTO _tmp_amount, _tmp_currency;
-    ASSERT _tmp_currency = 'HBD', 'expecting HBD currency';
-    _result = jsonb_set(_result, '{curator_payout_value}', to_jsonb(_tmp_amount || ' HBD'));
+    ASSERT _tmp_currency = '{{HBD_SYMBOL}}', 'expecting stable token currency';
+    _result = jsonb_set(_result, '{curator_payout_value}', to_jsonb(_tmp_amount || ' {{HBD_SYMBOL}}'));
     _tmp_amount = _row.payout - _tmp_amount;
-    _result = jsonb_set(_result, '{total_payout_value}', to_jsonb(_tmp_amount || ' HBD'));
+    _result = jsonb_set(_result, '{total_payout_value}', to_jsonb(_tmp_amount || ' {{HBD_SYMBOL}}'));
     _result = jsonb_set(_result, '{reward_weight}', to_jsonb(10000));
     _result = jsonb_set(_result, '{root_author}', to_jsonb(_row.root_author));
     _result = jsonb_set(_result, '{root_permlink}', to_jsonb(_row.root_permlink));
@@ -81,7 +81,7 @@ BEGIN
     _result = jsonb_set(_result, '{allow_curation_rewards}', to_jsonb(_row.allow_curation_rewards));
     _result = jsonb_set(_result, '{net_votes}', to_jsonb(_row.net_votes));
     _result = jsonb_set(_result, '{children_abs_rshares}', to_jsonb(0));
-    _result = jsonb_set(_result, '{total_pending_payout_value}', to_jsonb('0.000 HBD'::text));
+    _result = jsonb_set(_result, '{total_pending_payout_value}', to_jsonb('0.000 {{HBD_SYMBOL}}'::text));
     _result = jsonb_set(_result, '{reblogged_by}', '[]'::jsonb);
 
     IF _row.is_paidout THEN
@@ -101,7 +101,7 @@ BEGIN
     IF _row.is_paidout THEN
       _result = jsonb_set(_result, '{curator_payout_value}', to_jsonb(_row.curator_payout_value));
       SELECT amount, currency FROM hivemind_postgrest_utilities.parse_asset(_row.curator_payout_value) AS (amount NUMERIC, currency hivemind_postgrest_utilities.currency) INTO _tmp_amount, _tmp_currency;
-      ASSERT _tmp_currency = 'HBD', 'expecting HBD currency';
+      ASSERT _tmp_currency = '{{HBD_SYMBOL}}', 'expecting stable token currency';
       _tmp_amount = _row.payout - _tmp_amount;
       _result = jsonb_set(_result, '{total_payout_value}', to_jsonb(_tmp_amount || ' ' || _tmp_currency));
     END IF;

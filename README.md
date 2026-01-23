@@ -224,6 +224,17 @@ REPUTATION_TRACKER_IMAGE  # Container registry for reputation_tracker images
 REPUTATION_TRACKER_VERSION # reputation_tracker image version
 ```
 
+#### Forks / custom asset symbols
+If you run Hivemind against a forked chain with different asset symbols, set
+these environment variables *before* running `setup`/`build_schema` so SQL
+scripts and defaults are generated correctly:
+
+```bash
+# Example: Pixagram
+HIVEMIND_HIVE_SYMBOL=PIXA
+HIVEMIND_HBD_SYMBOL=PXS
+```
+
 Once the `.env` file is properly configured, navigate to the directory
 containing the Docker Compose file and start the HAF API Node with the
 following command:
@@ -682,7 +693,6 @@ using docker containers and second run on host with using hivemind virtual envir
   ```
   curl localhost:8080 --header "Content-Type: application/json" --data '{"id": "cagdbc1", "method": "condenser_api.get_follow_count", "params": ["gtg"], "jsonrpc": "2.0"}'
   ```
-
 
 
 

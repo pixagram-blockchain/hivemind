@@ -32,7 +32,7 @@ _result = (
         hcd.category AS name,
         COUNT(*) AS comments,
         SUM(CASE WHEN hp.depth = 0 THEN 1 ELSE 0 END) AS top_posts,
-        SUM(hp.payout + hp.pending_payout) || ' HBD' AS total_payouts
+        SUM(hp.payout + hp.pending_payout) || ' {{HBD_SYMBOL}}' AS total_payouts
       FROM
         hivemind_app.hive_posts hp
         JOIN hivemind_app.hive_category_data hcd ON hcd.id = hp.category_id

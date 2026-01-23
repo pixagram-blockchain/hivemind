@@ -22,7 +22,7 @@ haf_sync() {
         --test-profile=False \
         --prometheus-port 11011 \
         --database-url "${HAF_POSTGRES_URL}" \
-        --community-start-block 4998000 \
+        --community-start-block "${COMMUNITY_START_BLOCK:-4998000}" \
         2>&1 | tee -i "$LOG_DIR/hivemind-sync.log"
 }
 
