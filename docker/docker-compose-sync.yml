@@ -55,6 +55,8 @@ services:
       HAF_ADMIN_POSTGRES_URL: postgresql://haf_admin@haf:5432/haf_block_log
       HAF_POSTGRES_URL: postgresql://hivemind@haf:5432/haf_block_log
       ADD_MOCKS: ${ADD_MOCKS:-true}
+      HIVEMIND_HIVE_SYMBOL: ${HIVEMIND_HIVE_SYMBOL:-HIVE}
+      HIVEMIND_HBD_SYMBOL: ${HIVEMIND_HBD_SYMBOL:-HBD}
     networks:
       haf-network:
     depends_on:
@@ -82,7 +84,7 @@ services:
           --test-profile=False \
           --prometheus-port 11011 \
           --database-url="$${HAF_POSTGRES_URL}" \
-          --community-start-block 4998000
+          --community-start-block "$${COMMUNITY_START_BLOCK:-4998000}"
 
         echo "Waiting for reputation_tracker to complete..."
         wait $$REP_TRACKER_PID
@@ -92,6 +94,9 @@ services:
       HAF_ADMIN_POSTGRES_URL: postgresql://haf_admin@haf:5432/haf_block_log
       HAF_POSTGRES_URL: postgresql://hivemind@haf:5432/haf_block_log
       RUNNER_HIVEMIND_SYNC_MAX_BLOCK: ${RUNNER_HIVEMIND_SYNC_MAX_BLOCK:-5000024}
+      COMMUNITY_START_BLOCK: ${COMMUNITY_START_BLOCK:-4998000}
+      HIVEMIND_HIVE_SYMBOL: ${HIVEMIND_HIVE_SYMBOL:-HIVE}
+      HIVEMIND_HBD_SYMBOL: ${HIVEMIND_HBD_SYMBOL:-HBD}
     networks:
       haf-network:
     # Note: depends_on is omitted - CI script controls ordering by running

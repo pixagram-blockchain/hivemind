@@ -8,19 +8,15 @@ import math
 from pytz import utc
 import ujson as json
 
-NAI_MAP = {
-    '@@000000013': 'HBD',
-    '@@000000021': 'HIVE',
-    '@@000000037': 'VESTS',
-}
-
-NAI_PRECISION = {
-    '@@000000013': 3,
-    '@@000000021': 3,
-    '@@000000037': 6,
-}
-
-UNIT_NAI = {'HBD': '@@000000013', 'HIVE': '@@000000021', 'VESTS': '@@000000037'}
+from hive.utils.chain import (
+    HBD_SYMBOL,
+    HIVE_SYMBOL,
+    NAI_MAP,
+    NAI_PRECISION,
+    UNIT_NAI,
+    VESTS_SYMBOL,
+    canonical_symbol,
+)
 
 # convert special chars into their octal formats recognized by sql
 SPECIAL_CHARS = {
@@ -49,6 +45,7 @@ def to_nai(value):
 
     elif isinstance(value, str):
         raw_amount, unit = value.split(' ')
+        unit = canonical_symbol(unit)
         assert unit in UNIT_NAI, f"Unknown unit {unit}"
         nai = UNIT_NAI[unit]
         precision = NAI_PRECISION[nai]
@@ -100,17 +97,17 @@ def escape_characters(text):
 
 def vests_amount(value):
     """Returns a decimal amount, asserting units are VESTS"""
-    return parse_amount(value, 'VESTS')
+    return parse_amount(value, VESTS_SYMBOL)
 
 
 def steem_amount(value):
-    """Returns a decimal amount, asserting units are HIVE"""
-    return parse_amount(value, 'HIVE')
+    """Returns a decimal amount, asserting units are the main token"""
+    return parse_amount(value, HIVE_SYMBOL)
 
 
 def sbd_amount(value):
-    """Returns a decimal amount, asserting units are HBD"""
-    return parse_amount(value, 'HBD')
+    """Returns a decimal amount, asserting units are the stable token"""
+    return parse_amount(value, HBD_SYMBOL)
 
 
 def parse_amount(value, expected_unit=None):
@@ -120,10 +117,7 @@ def parse_amount(value, expected_unit=None):
 
     if isinstance(value, str):
         raw_amount, unit = value.split(' ')
-        if unit == 'SBD':
-            unit = 'HBD'
-        elif unit == 'STEEM':
-            unit = 'HIVE'
+        unit = canonical_symbol(unit)
         dec_amount = decimal.Decimal(raw_amount)
 
     elif isinstance(value, list):
@@ -136,6 +130,7 @@ def parse_amount(value, expected_unit=None):
         raise Exception(f"invalid input amount {repr(value)}")
 
     if expected_unit:
+        expected_unit = canonical_symbol(expected_unit)
         # FIXME to be uncommented when payout collection will be corrected
         #        assert unit == expected_unit, "Unexpected unit: %s" % unit
         return dec_amount
@@ -153,7 +148,7 @@ def legacy_amount(value):
     if isinstance(value, str):
         return value  # already legacy
     amt, asset = parse_amount(value)
-    prec = {'HBD': 3, 'HIVE': 3, 'VESTS': 6}[asset]
+    prec = {HBD_SYMBOL: 3, HIVE_SYMBOL: 3, VESTS_SYMBOL: 6}[asset]
     tmpl = "%%.%df %%s" % prec
     return tmpl % (amt, asset)
 

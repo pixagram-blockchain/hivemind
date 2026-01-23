@@ -20,6 +20,7 @@ from hive.conf import SCHEMA_OWNER_NAME
 from hive.indexer.hive_db.haf_functions import prepare_app_context
 
 from hive.version import GIT_DATE, GIT_REVISION, VERSION
+from hive.utils.chain import HBD_SYMBOL, sql_template_vars
 import json
 
 log = logging.getLogger(__name__)
@@ -82,7 +83,7 @@ def build_metadata():
         # important indexes
         sa.Column('sc_trend', sa.Float(precision=6), nullable=False, server_default='0'),
         sa.Column('sc_hot', sa.Float(precision=6), nullable=False, server_default='0'),
-        sa.Column('total_payout_value', sa.String(30), nullable=False, server_default='0.000 HBD'),
+        sa.Column('total_payout_value', sa.String(30), nullable=False, server_default=f'0.000 {HBD_SYMBOL}'),
         sa.Column('author_rewards', sa.BigInteger, nullable=False, server_default='0'),
         sa.Column('author_rewards_hive', sa.BigInteger, nullable=False, server_default='0'),
         sa.Column('author_rewards_hbd', sa.BigInteger, nullable=False, server_default='0'),
@@ -95,8 +96,8 @@ def build_metadata():
         sa.Column('active', sa.DateTime, nullable=False, server_default='1970-01-01 00:00:00'),
         sa.Column('cashout_time', sa.DateTime, nullable=False, server_default='1970-01-01 00:00:00'),
         sa.Column('percent_hbd', sa.Integer, nullable=False, server_default='10000'),
-        sa.Column('curator_payout_value', sa.String(30), nullable=False, server_default='0.000 HBD'),
-        sa.Column('max_accepted_payout', sa.String(30), nullable=False, server_default='1000000.000 HBD'),
+        sa.Column('curator_payout_value', sa.String(30), nullable=False, server_default=f'0.000 {HBD_SYMBOL}'),
+        sa.Column('max_accepted_payout', sa.String(30), nullable=False, server_default=f'1000000.000 {HBD_SYMBOL}'),
         sa.Column('allow_votes', BOOLEAN, nullable=False, server_default='1'),
         sa.Column('allow_curation_rewards', BOOLEAN, nullable=False, server_default='1'),
         sa.Column('beneficiaries', sa.JSON, nullable=False, server_default='[]'),
@@ -919,6 +920,8 @@ def execute_sql_script(query_executor, path_to_script):
         with open(path_to_script, 'r') as sql_script_file:
             sql_script = sql_script_file.read()
         if sql_script is not None:
+            for key, value in sql_template_vars().items():
+                sql_script = sql_script.replace(f"{{{{{key}}}}}", value)
             return query_executor(sql_script)
     except Exception as ex:
         log.exception(f"Error running sql script: {ex}")

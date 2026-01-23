@@ -59,6 +59,8 @@ services:
       HAF_POSTGRES_URL: postgresql://hivemind@haf:5432/haf_block_log
       HIVEMIND_PORT: ${HIVEMIND_PORT:-8080}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      HIVEMIND_HIVE_SYMBOL: ${HIVEMIND_HIVE_SYMBOL:-HIVE}
+      HIVEMIND_HBD_SYMBOL: ${HIVEMIND_HBD_SYMBOL:-HBD}
     ports:
       - "${HIVEMIND_PORT:-8080}:${HIVEMIND_PORT:-8080}"
     networks:

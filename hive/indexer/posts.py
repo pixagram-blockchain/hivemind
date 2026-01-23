@@ -18,6 +18,7 @@ from hive.indexer.post_data_cache import PostDataCache
 from hive.indexer.votes import Votes
 from hive.indexer.notification_cache import NotificationCache
 from hive.utils.misc import chunks, UniqueCounter
+from hive.utils.chain import HBD_SYMBOL
 from hive.utils.normalize import escape_characters, legacy_amount, sbd_amount
 
 log = logging.getLogger(__name__)
@@ -370,7 +371,9 @@ class Posts(DbAdapterHolder):
     def comment_options_op(cls, op):
         """Process comment_options_operation"""
         max_accepted_payout = (
-            legacy_amount(op['max_accepted_payout']) if 'max_accepted_payout' in op else '1000000.000 HBD'
+            legacy_amount(op['max_accepted_payout'])
+            if 'max_accepted_payout' in op
+            else f'1000000.000 {HBD_SYMBOL}'
         )
         allow_votes = op['allow_votes'] if 'allow_votes' in op else True
         allow_curation_rewards = op['allow_curation_rewards'] if 'allow_curation_rewards' in op else True

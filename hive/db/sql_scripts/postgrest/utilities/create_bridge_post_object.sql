@@ -104,15 +104,15 @@ BEGIN
 
   IF _row.is_paidout THEN
     SELECT amount, currency FROM hivemind_postgrest_utilities.parse_asset(_row.curator_payout_value) AS (amount NUMERIC, currency hivemind_postgrest_utilities.currency) INTO _tmp_amount, _tmp_currency;
-    ASSERT _tmp_currency = 'HBD', 'expecting HBD currency';
-    _result = jsonb_set(_result, '{curator_payout_value}', to_jsonb(_tmp_amount || ' HBD'));
+    ASSERT _tmp_currency = '{{HBD_SYMBOL}}', 'expecting stable token currency';
+    _result = jsonb_set(_result, '{curator_payout_value}', to_jsonb(_tmp_amount || ' {{HBD_SYMBOL}}'));
     _tmp_amount = _row.payout - _tmp_amount;
-    _result = jsonb_set(_result, '{author_payout_value}', to_jsonb(_tmp_amount || ' HBD'));
-    _result = jsonb_set(_result, '{pending_payout_value}', to_jsonb('0.000 HBD'::text));
+    _result = jsonb_set(_result, '{author_payout_value}', to_jsonb(_tmp_amount || ' {{HBD_SYMBOL}}'));
+    _result = jsonb_set(_result, '{pending_payout_value}', to_jsonb('0.000 {{HBD_SYMBOL}}'::text));
   ELSE
-    _result = jsonb_set(_result, '{author_payout_value}', to_jsonb('0.000 HBD'::text));
-    _result = jsonb_set(_result, '{curator_payout_value}', to_jsonb('0.000 HBD'::text));
-    _result = jsonb_set(_result, '{pending_payout_value}', to_jsonb(_result->>'payout' || ' HBD'));
+    _result = jsonb_set(_result, '{author_payout_value}', to_jsonb('0.000 {{HBD_SYMBOL}}'::text));
+    _result = jsonb_set(_result, '{curator_payout_value}', to_jsonb('0.000 {{HBD_SYMBOL}}'::text));
+    _result = jsonb_set(_result, '{pending_payout_value}', to_jsonb(_result->>'payout' || ' {{HBD_SYMBOL}}'));
   END IF;
 
   IF _row.depth > 0 THEN
