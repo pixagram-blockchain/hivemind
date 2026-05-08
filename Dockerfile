@@ -4,9 +4,9 @@
 
 ARG POSTGREST_VERSION=409108966606eba9e8f270c76dfb929cae65dba3
 
-FROM registry.gitlab.syncad.com/hive/common-ci-configuration/postgrest:${POSTGREST_VERSION} AS pure_postgrest
+FROM --platform=$TARGETPLATFORM registry.gitlab.syncad.com/hive/common-ci-configuration/postgrest:${POSTGREST_VERSION} AS pure_postgrest
 
-FROM --platform=$BUILDPLATFORM python:3.14-slim-bookworm as runtime
+FROM --platform=$TARGETPLATFORM python:3.14-slim-bookworm as runtime
 
 ARG TARGETPLATFORM
 ARG BUILDPLATFORM
@@ -21,7 +21,7 @@ ENV TARGETPLATFORM=${TARGETPLATFORM}
 ENV BUILDPLATFORM=${BUILDPLATFORM}
 
 # Fetch HAF setup script from common-ci-configuration (no submodule needed)
-ADD https://gitlab.syncad.com/hive/common-ci-configuration/-/raw/${COMMON_CI_REF}/haf-app-tools/scripts/setup_ubuntu.sh /root/setup_os.sh
+COPY docker/setup_os.sh /root/setup_os.sh
 
 RUN <<EOF
   set -e
@@ -47,7 +47,13 @@ RUN <<EOF
 
   /root/setup_os.sh --haf-admin-account="haf_admin"
   # This user needs UID of 1000 to be able to save logs to cache when run in CI
-  useradd -ms /bin/bash -c "Hivemind service account" -u 1000 "hivemind" --groups users
+  if ! id -u "hivemind" >/dev/null 2>&1; then
+    if getent passwd 1000 >/dev/null 2>&1; then
+      useradd -ms /bin/bash -c "Hivemind service account" "hivemind" --groups users
+    else
+      useradd -ms /bin/bash -c "Hivemind service account" -u 1000 "hivemind" --groups users
+    fi
+  fi
   # Grant hivemind sudo access for CI operations (e.g., relaxing pgdata permissions for caching)
   echo "hivemind ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 EOF
@@ -155,8 +161,8 @@ COPY --from=builder --chown=hivemind:hivemind  /home/hivemind/app/docker/block-p
 COPY --from=builder --chown=hivemind:hivemind  /home/hivemind/app/scripts /home/hivemind/app
 
 # Fetch HAF scripts from common-ci-configuration (no submodule needed)
-ADD --chown=hivemind:hivemind --chmod=755 https://gitlab.syncad.com/hive/common-ci-configuration/-/raw/${COMMON_CI_REF}/haf-app-tools/scripts/create_haf_app_role.sh /home/hivemind/haf/scripts/create_haf_app_role.sh
-ADD --chown=hivemind:hivemind --chmod=755 https://gitlab.syncad.com/hive/common-ci-configuration/-/raw/${COMMON_CI_REF}/haf-app-tools/scripts/common.sh /home/hivemind/haf/scripts/common.sh
+COPY --chown=hivemind:hivemind --chmod=755 docker/haf_scripts/create_haf_app_role.sh /home/hivemind/haf/scripts/create_haf_app_role.sh
+COPY --chown=hivemind:hivemind --chmod=755 docker/haf_scripts/common.sh /home/hivemind/haf/scripts/common.sh
 ADD --chmod=755 https://gitlab.syncad.com/hive/common-ci-configuration/-/raw/${COMMON_CI_REF}/haf-app-tools/scripts/run_with_reconnect.sh /usr/local/bin/run_with_reconnect.sh
 COPY --from=builder --chown=hivemind:hivemind  /home/hivemind/app/mock_data/block_data /home/hivemind/app/mock_data/block_data
 COPY --from=builder --chown=hivemind:hivemind  /home/hivemind/app/mock_data/vops_data /home/hivemind/app/mock_data/vops_data

@@ -157,6 +157,26 @@ def setup(db, admin_db):
     reset_autovac(db)  # tune auto vacuum/analyze
     set_fillfactor(db)
 
+    # Register tables with HFM so the fork manager auto-tracks deltas and
+    # can rewind them on a microfork. Required because the context is now
+    # forking (_is_forking=TRUE in haf_functions.py). app_register_table
+    # adds hive_rowid + change-tracking triggers in one shot.
+    #
+    # 1.28.6 moved schema creation into SQL (create_tables.sql) and dropped
+    # build_metadata(), so the table list is read from the catalog instead.
+    tables_to_register = db.query_col(
+        f"""SELECT tablename FROM pg_tables
+             WHERE schemaname = '{SCHEMA_NAME}'
+               AND tablename <> 'hive_db_patch_level'
+             ORDER BY tablename"""
+    )
+    log.info(f"Registering {len(tables_to_register)} tables with the fork manager...")
+    for table_name in tables_to_register:
+        db.query_no_return(
+            f"SELECT hive.app_register_table('{SCHEMA_NAME}', '{table_name}', '{SCHEMA_NAME}');"
+        )
+
+
     # default rows
     insert_seed_data(db)
     db.query(f"UPDATE {SCHEMA_NAME}.hive_state SET db_version = 0")
