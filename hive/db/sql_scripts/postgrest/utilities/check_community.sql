@@ -7,10 +7,10 @@ AS
 $BODY$
 BEGIN
   IF _name IS NOT NULL AND
-    LENGTH(_name) > 5 AND
-    SUBSTRING(_name FROM 1 FOR 5) = 'hive-' AND
-    SUBSTRING(_name FROM 6 FOR 1) IN ('1', '2', '3') AND
-    _name ~ '^hive-[123]\d{4,6}$' THEN
+    LENGTH(_name) > 7 AND
+    SUBSTRING(_name FROM 1 FOR 7) = 'portal-' AND
+    SUBSTRING(_name FROM 8 FOR 1) IN ('1', '2', '3') AND
+    _name ~ '^portal-[123]\d{4,6}$' THEN
 
     RETURN TRUE;
   ELSE

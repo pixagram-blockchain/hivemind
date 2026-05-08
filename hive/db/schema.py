@@ -538,13 +538,16 @@ def setup(db, admin_db):
     reset_autovac(db) # tune auto vacuum/analyze
     set_fillfactor(db)
 
-    # Uncomment tables registration when hivemind becomes forking application
-    #for table in build_metadata().sorted_tables:
-    #    if table.name in ('hive_db_patch_level',):
-    #        continue
-    #
-    #    sql = f'ALTER TABLE {SCHEMA_NAME}.{table.name} INHERIT {SCHEMA_NAME}.{SCHEMA_NAME};'
-    #    db.query(sql)
+    # Register tables with HFM so the fork manager auto-tracks deltas and
+    # can rewind them on a microfork. Required because the context is now
+    # forking (_is_forking=TRUE in haf_functions.py). app_register_table
+    # adds hive_rowid + change-tracking triggers in one shot.
+    for table in build_metadata().sorted_tables:
+        if table.name in ('hive_db_patch_level',):
+            continue
+        db.query_no_return(
+            f"SELECT hive.app_register_table('{SCHEMA_NAME}', '{table.name}', '{SCHEMA_NAME}');"
+        )
 
     # default rows
     sqls = [

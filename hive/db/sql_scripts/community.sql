@@ -178,8 +178,8 @@ DECLARE
     _type_id INTEGER;
     _notification_first_block INTEGER;
 BEGIN
-    -- Extract type_id from name (6th character, after "hive-")
-    _type_id := SUBSTRING(_name, 6, 1)::INTEGER;
+    -- Extract type_id from name (8th character, after "portal-")
+    _type_id := SUBSTRING(_name, 8, 1)::INTEGER;
 
     INSERT INTO hivemind_app.hive_communities (id, name, type_id, created_at, block_num)
     VALUES (_account_id, _name, _type_id, _block_date, _block_num);

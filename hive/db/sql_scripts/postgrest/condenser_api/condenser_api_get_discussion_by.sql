@@ -51,7 +51,7 @@ BEGIN
     WHEN _case = 'created' THEN
       IF _tag IS NULL OR _tag = '' THEN
         RETURN hivemind_postgrest_utilities.get_all_created_ranked_posts(_post_id, _observer_id, _limit, _truncate_body, False);
-      ELSIF left(_tag, 5) = 'hive-' THEN
+      ELSIF left(_tag, 7) = 'portal-' THEN
         RETURN hivemind_postgrest_utilities.get_ranked_posts_for_communities(_post_id, _observer_id, _limit, _truncate_body, _tag, False, 'created'::hivemind_postgrest_utilities.ranked_post_sort_type);
       ELSE
         RETURN hivemind_postgrest_utilities.get_created_ranked_posts_for_tag(_post_id, _observer_id, _limit, _truncate_body, _tag, False);
@@ -59,7 +59,7 @@ BEGIN
     WHEN _case = 'trending' THEN
       IF _tag IS NULL OR _tag = '' THEN
         RETURN hivemind_postgrest_utilities.get_all_trending_ranked_posts(_post_id, _observer_id, _limit, _truncate_body, False);
-      ELSIF left(_tag, 5) = 'hive-' THEN
+      ELSIF left(_tag, 7) = 'portal-' THEN
          RETURN hivemind_postgrest_utilities.get_ranked_posts_for_communities(_post_id, _observer_id, _limit, _truncate_body, _tag, False, 'trending'::hivemind_postgrest_utilities.ranked_post_sort_type);
       ELSE
         RETURN hivemind_postgrest_utilities.get_trending_ranked_posts_for_tag(_post_id, _observer_id, _limit, _truncate_body, _tag, False);
@@ -67,7 +67,7 @@ BEGIN
     WHEN _case = 'hot' THEN
       IF _tag IS NULL OR _tag = '' THEN
         RETURN hivemind_postgrest_utilities.get_all_hot_ranked_posts(_post_id, _observer_id, _limit, _truncate_body, False);
-      ELSIF left(_tag, 5) = 'hive-' THEN
+      ELSIF left(_tag, 7) = 'portal-' THEN
          RETURN hivemind_postgrest_utilities.get_ranked_posts_for_communities(_post_id, _observer_id, _limit, _truncate_body, _tag, False, 'hot'::hivemind_postgrest_utilities.ranked_post_sort_type);
       ELSE
         RETURN hivemind_postgrest_utilities.get_hot_ranked_posts_for_tag(_post_id, _observer_id, _limit, _truncate_body, _tag, False);

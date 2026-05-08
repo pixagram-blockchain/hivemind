@@ -118,10 +118,10 @@ def check_community(name) -> bool:
     if (
         name
         and isinstance(name, str)
-        and len(name) > 5
-        and name[:5] == 'hive-'
-        and name[5] in ['1', '2', '3']
-        and re.match(r'^hive-[123]\d{4,6}$', name)
+        and len(name) > 7
+        and name[:7] == 'portal-'
+        and name[7] in ['1', '2', '3']
+        and re.match(r'^portal-[123]\d{4,6}$', name)
     ):
         return True
     return False
@@ -168,7 +168,7 @@ class Community:
         This method checks for any valid community names and inserts them.
         """
 
-        if not re.match(r'^hive-[123]\d{4,6}$', name):
+        if not re.match(r'^portal-[123]\d{4,6}$', name):
             return
 
         _id = Accounts.get_id(name)
