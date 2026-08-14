@@ -1219,7 +1219,7 @@ BEGIN
             s.id,
             s.val->>'author' AS author,
             s.val->>'permlink' AS permlink,
-            COALESCE(hivemind_app.legacy_amount(s.val->'max_accepted_payout'), '1000000.000 HBD') AS max_accepted_payout,
+            COALESCE(hivemind_app.legacy_amount(s.val->'max_accepted_payout'), '1000000.000 {{HBD_SYMBOL}}') AS max_accepted_payout,
             COALESCE((s.val->>'percent_hbd')::INT, 10000) AS percent_hbd,
             COALESCE((s.val->>'allow_votes')::BOOLEAN, TRUE) AS allow_votes,
             COALESCE((s.val->>'allow_curation_rewards')::BOOLEAN, TRUE) AS allow_curation_rewards,
@@ -1492,7 +1492,7 @@ BEGIN
             SELECT DISTINCT ON (s.val->>'author', s.val->>'permlink')
                 s.val->>'author' AS author,
                 s.val->>'permlink' AS permlink,
-                COALESCE(hivemind_app.legacy_amount(s.val->'max_accepted_payout'), '1000000.000 HBD') AS max_accepted_payout,
+                COALESCE(hivemind_app.legacy_amount(s.val->'max_accepted_payout'), '1000000.000 {{HBD_SYMBOL}}') AS max_accepted_payout,
                 COALESCE((s.val->>'percent_hbd')::INT, 10000) AS percent_hbd,
                 COALESCE((s.val->>'allow_votes')::BOOLEAN, TRUE) AS allow_votes,
                 COALESCE((s.val->>'allow_curation_rewards')::BOOLEAN, TRUE) AS allow_curation_rewards,
