@@ -288,7 +288,7 @@ DECLARE
     _rec RECORD;
     _counter INT;
 BEGIN
-    -- For each newly created account matching hive-[123]\d{4,6}$ pattern that was
+    -- For each newly created account matching portal-[123]\d{4,6}$ pattern that was
     -- created at or after the community support start block, register a community.
     -- This mirrors the old Python Community.register() called from Accounts.register().
     FOR _rec IN
@@ -304,7 +304,7 @@ BEGIN
         END
         WHERE s.op_type_id IN (9, 14, 23, 30, 41)
           AND s.block_num > _community_support_start_block
-          AND ha.name ~ '^hive-[123]\d{4,6}$'
+          AND ha.name ~ '^portal-[123]\d{4,6}$'
           AND NOT EXISTS (
               SELECT 1 FROM hivemind_app.hive_communities hc WHERE hc.name = ha.name
           )
