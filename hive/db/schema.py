@@ -164,11 +164,24 @@ def setup(db, admin_db):
     #
     # 1.28.6 moved schema creation into SQL (create_tables.sql) and dropped
     # build_metadata(), so the table list is read from the catalog instead.
+    #
+    # Two exclusions matter:
+    #  - the context root table (named after the schema) must be skipped, or
+    #    app_register_table tries to make it inherit from itself and fails with
+    #    "circular inheritance not allowed",
+    #  - tables that already inherit from it are registered, so skipping them
+    #    keeps setup re-runnable.
     tables_to_register = db.query_col(
-        f"""SELECT tablename FROM pg_tables
-             WHERE schemaname = '{SCHEMA_NAME}'
-               AND tablename <> 'hive_db_patch_level'
-             ORDER BY tablename"""
+        f"""SELECT c.relname
+              FROM pg_class c
+              JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE n.nspname = '{SCHEMA_NAME}'
+               AND c.relkind = 'r'
+               AND c.relname <> '{SCHEMA_NAME}'
+               AND NOT EXISTS (
+                     SELECT 1 FROM pg_inherits i WHERE i.inhrelid = c.oid
+                   )
+             ORDER BY c.relname"""
     )
     log.info(f"Registering {len(tables_to_register)} tables with the fork manager...")
     for table_name in tables_to_register:
