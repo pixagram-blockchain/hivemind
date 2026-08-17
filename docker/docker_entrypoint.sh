@@ -141,6 +141,17 @@ setup() {
     ./scripts/install_app.sh --postgres-url="${POSTGRES_ADMIN_URL}" --schema="${REPTRACKER_SCHEMA}" --is_forking="false"
     popd
 
+    # Create the hafah roles. hafah's install_app.sh does "SET ROLE hafah_owner"
+    # but no longer creates the role: 1.28.6 deleted hafah/scripts/setup_postgres.sh,
+    # which used to do it. Reproduce what that script did, using the
+    # create_haf_app_role.sh vendored under docker/haf_scripts (same helper
+    # hivemind's own scripts/setup_postgres.sh uses for the hivemind roles).
+    # Without this, install_app.sh fails: role "hafah_owner" does not exist.
+    "${haf_dir}/scripts/create_haf_app_role.sh" --postgres-url="${POSTGRES_ADMIN_URL}" --haf-app-account="hafah_owner"
+    "${haf_dir}/scripts/create_haf_app_role.sh" --postgres-url="${POSTGRES_ADMIN_URL}" --haf-app-account="hafah_user"
+    psql "${POSTGRES_ADMIN_URL}" -v ON_ERROR_STOP=on -c 'GRANT hafah_owner TO haf_admin;'
+    psql "${POSTGRES_ADMIN_URL}" -v ON_ERROR_STOP=on -c 'GRANT hafah_user TO haf_admin;'
+
     # Install hafah application
     pushd "$hafah_dir"
     ./scripts/install_app.sh --postgres-url="${POSTGRES_ADMIN_URL}"
