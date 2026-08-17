@@ -216,9 +216,41 @@ class DbState:
             work_mem_after = db.query_one(sql_show_work_mem)
             assert work_mem_after == work_mem_before, f'work_mem was changed: {work_mem_before} -> {work_mem_after}'
 
+    _tables_registered = None
+
+    @classmethod
+    def _has_registered_tables(cls):
+        """True when our tables are registered with the fork manager.
+
+        The massive-sync speedups (dropping indexes and foreign keys) go through
+        hive.app_save_and_drop_*(), which are SECURITY DEFINER owned by
+        haf_admin. On a registered table that DDL fires
+        hive.on_edit_registered_tables() -> hive.check_owner(), which compares
+        the context owner against CURRENT_USER by plain string match. The
+        context is owned by the schema owner, so the call always raises and the
+        retry loop starves the sync (~1k blocks/min instead of ~500k).
+
+        Registration is what makes forking mode able to rewind on a microfork,
+        so we keep it and skip the DDL juggling instead: sync still completes,
+        just with indexes and FKs left in place.
+        """
+        if cls._tables_registered is None:
+            cls._tables_registered = bool(
+                cls.db().query_one(
+                    """SELECT count(*) > 0
+                         FROM hafd.registered_tables rt
+                         JOIN hafd.contexts c ON c.id = rt.context_id
+                        WHERE c.name = 'hivemind_app'"""
+                )
+            )
+        return cls._tables_registered
+
     @classmethod
     def _drop_all_registered_indexes(cls):
         """Drop all HAF-registered indexes for the hivemind_app context."""
+        if cls._has_registered_tables():
+            log.info("[MASSIVE] Tables are registered with HFM - keeping indexes in place")
+            return
         log.info("[MASSIVE] Dropping all registered indexes")
         time_start = perf_counter()
         cls._retry_ddl(
@@ -285,6 +317,13 @@ class DbState:
         Excludes hive_post_data — the BM25 index is deferred to the fills phase
         where it runs in parallel with other finalization work.
         """
+        if cls._has_registered_tables():
+            # _drop_all_registered_indexes() was skipped, so there is nothing to
+            # restore and hive.app_restore_indexes() would hit the same
+            # check_owner() failure.
+            log.info("[MASSIVE] Tables are registered with HFM - indexes were never dropped")
+            return
+
         start_time = FOSM.start()
 
         methods = []
@@ -420,6 +459,12 @@ class DbState:
         if cls._fk_were_disabled:
             return
 
+        if cls._has_registered_tables():
+            log.info("Tables are registered with HFM - keeping foreign keys in place")
+            cls._fk_were_disabled = True
+            cls._fk_were_enabled = False
+            return
+
         log.info("Dropping foreign keys")
         time_start = perf_counter()
         for table in cls._TABLES_WITH_FKS:
@@ -465,6 +510,12 @@ class DbState:
     @classmethod
     def ensure_fk_are_enabled(cls):
         if cls._fk_were_enabled:
+            return
+
+        if cls._has_registered_tables():
+            # Nothing was dropped, so there is nothing to recreate.
+            cls._fk_were_disabled = False
+            cls._fk_were_enabled = True
             return
 
         start_time_foreign_keys = perf_counter()

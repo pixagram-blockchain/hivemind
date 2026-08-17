@@ -165,12 +165,16 @@ def setup(db, admin_db):
     # 1.28.6 moved schema creation into SQL (create_tables.sql) and dropped
     # build_metadata(), so the table list is read from the catalog instead.
     #
-    # Two exclusions matter:
+    # Exclusions that matter:
     #  - the context root table (named after the schema) must be skipped, or
     #    app_register_table tries to make it inherit from itself and fails with
     #    "circular inheritance not allowed",
+    #  - hive_db_patch_level must never be registered: registration adds a
+    #    hive_rowid column and the rows are read into a fixed PatchLevelInfo
+    #    dataclass, which then dies on the unexpected keyword,
     #  - tables that already inherit from it are registered, so skipping them
     #    keeps setup re-runnable.
+    #
     tables_to_register = db.query_col(
         f"""SELECT c.relname
               FROM pg_class c
@@ -178,6 +182,7 @@ def setup(db, admin_db):
              WHERE n.nspname = '{SCHEMA_NAME}'
                AND c.relkind = 'r'
                AND c.relname <> '{SCHEMA_NAME}'
+               AND c.relname <> 'hive_db_patch_level'
                AND NOT EXISTS (
                      SELECT 1 FROM pg_inherits i WHERE i.inhrelid = c.oid
                    )
