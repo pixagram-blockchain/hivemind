@@ -172,6 +172,15 @@ def setup(db, admin_db):
     #  - hive_db_patch_level must never be registered: registration adds a
     #    hive_rowid column and the rows are read into a fixed PatchLevelInfo
     #    dataclass, which then dies on the unexpected keyword,
+    #  - hive_state must never be registered: it is control data (sync
+    #    position, db_version, git revision), not fork-revertible chain data.
+    #    Registering it attaches on_update_hivemind_app_hive_state(), which
+    #    rejects any edit made outside a hive.context_next_block() window --
+    #    and setup_runtime_code() stamps this table with an UPDATE on every
+    #    single startup. That makes the first install succeed (registration
+    #    happens after the stamp) and every later restart fail with
+    #    "Did not execute hive.context_next_block before table edition",
+    #    taking hivemind_sync, hivemind and jussi down with it,
     #  - tables that already inherit from it are registered, so skipping them
     #    keeps setup re-runnable.
     #
@@ -182,7 +191,7 @@ def setup(db, admin_db):
              WHERE n.nspname = '{SCHEMA_NAME}'
                AND c.relkind = 'r'
                AND c.relname <> '{SCHEMA_NAME}'
-               AND c.relname <> 'hive_db_patch_level'
+               AND c.relname NOT IN ('hive_db_patch_level', 'hive_state')
                AND NOT EXISTS (
                      SELECT 1 FROM pg_inherits i WHERE i.inhrelid = c.oid
                    )
