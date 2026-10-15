@@ -496,10 +496,17 @@ class DbState:
             # Must be dropped before UNLOGGED conversion. Safe on first run (IF EXISTS).
             cls.db().query_no_return("DROP INDEX IF EXISTS hivemind_app.hive_post_data_bm25_idx")
 
-            # Set tables to UNLOGGED for faster inserts (no WAL writes)
-            from hive.db.schema import set_logged_table_attribute
+            if cls._has_registered_tables():
+                # Registered tables keep their foreign keys, and PostgreSQL refuses to
+                # make a table UNLOGGED while it shares a foreign key with a logged one.
+                # The parallel conversion then fails or succeeds depending on lock order
+                # and kills the sync. Stay LOGGED; the later SET LOGGED is a no-op.
+                log.info("[MASSIVE] Tables are registered with HFM - keeping them LOGGED")
+            else:
+                # Set tables to UNLOGGED for faster inserts (no WAL writes)
+                from hive.db.schema import set_logged_table_attribute
 
-            set_logged_table_attribute(cls.db(), False)
+                set_logged_table_attribute(cls.db(), False)
 
         cls.disable_autovacuum_for_massive_sync()
 
