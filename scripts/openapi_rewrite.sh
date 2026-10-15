@@ -28,7 +28,10 @@ ENDPOINTS_IN_ORDER="
 ../$endpoints/endpoint_schema.sql
 ../$endpoints/types/operation.sql
 ../$endpoints/accounts/get_ops_by_account.sql
-../$endpoints/blog/get_reblogs.sql"
+../$endpoints/accounts/get_account_pending_author_rewards.sql
+../$endpoints/accounts/get_account_pending_curation_rewards.sql
+../$endpoints/blog/get_reblogs.sql
+../$endpoints/other/get_sync_status.sql"
 
 
 # Function to reverse the lines

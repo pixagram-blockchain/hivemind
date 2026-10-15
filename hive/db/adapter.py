@@ -102,13 +102,56 @@ class Db:
         self._trx_active = False
         self.name = name
 
-        self._conn = psycopg2.connect(self._url, application_name=f'hivemind_{self.name}')
-        self._conn.autocommit = True
-        register_default_jsonb(self._conn, loads=ujson.loads)
+        self._connect()
 
         self.__autoexplain = None
         if enable_autoexplain:
             self.__autoexplain = AutoExplainWrapper(self)
+
+    BLOCK_NOTIFY_CHANNELS = ("haf_new_block", "haf_new_irreversible")
+
+    def _connect(self):
+        self._conn = psycopg2.connect(self._url, application_name=f'hivemind_{self.name}')
+        self._conn.autocommit = True
+        register_default_jsonb(self._conn, loads=ujson.loads)
+        self._listening = False
+
+    def listen_for_blocks(self):
+        """Subscribe this connection to HAF's new-block notifications (haf#341).
+        Effective immediately (autocommit); redone after a reconnect."""
+        if self._listening:
+            return
+        with self._conn.cursor() as cur:
+            for channel in self.BLOCK_NOTIFY_CHANNELS:
+                cur.execute(f"LISTEN {channel}")
+        self._listening = True
+
+    def wait_for_block_notification(self, timeout: float) -> bool:
+        """Idle on the socket (no transaction, backend idle) until a block
+        notification arrives or timeout seconds pass. Returns True on a
+        notification. Requires listen_for_blocks() and no open transaction."""
+        import select
+        ready, _, _ = select.select([self._conn], [], [], timeout)
+        if not ready:
+            return False
+        self._conn.poll()
+        del self._conn.notifies[:]
+        return True
+
+    def reconnect(self):
+        """Replace a broken connection with a fresh one.
+
+        Only safe when no server-side state is expected to survive: the server
+        has already rolled back whatever transaction was open on the old
+        session, so the caller must be prepared to redo any uncommitted work.
+        """
+        try:
+            if self._conn is not None and not self._conn.closed:
+                self._conn.close()
+        except Exception:
+            log.info("Ignoring error while closing a broken connection", exc_info=True)
+        self._trx_active = False
+        self._connect()
 
     def clone(self, name):
         return Db(self._url, name, self.__autoexplain is not None)

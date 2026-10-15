@@ -38,7 +38,8 @@ def create_statistics(db):
 def _try_create_extension(db, ext_name):
     """Try to create an extension, return True if successful."""
     try:
-        db.query(f'CREATE EXTENSION IF NOT EXISTS {ext_name};')
+        # CASCADE: pg_search >= 0.25 depends on the vector extension
+        db.query(f'CREATE EXTENSION IF NOT EXISTS {ext_name} CASCADE;')
         return True
     except Exception:
         # With autocommit=True the failed statement is already rolled back
@@ -358,7 +359,10 @@ def setup_runtime_code(db):
         "endpoints/endpoint_schema.sql",
         "endpoints/types/operation.sql",
         "endpoints/accounts/get_ops_by_account.sql",
+        "endpoints/accounts/get_account_pending_author_rewards.sql",
+        "endpoints/accounts/get_account_pending_curation_rewards.sql",
         "endpoints/blog/get_reblogs.sql",
+        "endpoints/other/get_sync_status.sql",
     ]
 
     sql_scripts_dir_path = Path(__file__).parent / 'sql_scripts'
@@ -402,6 +406,11 @@ def setup_runtime_code(db):
 
     db.query_no_return(sql.format(GIT_REVISION))
     db.query_no_return(sql_hive_state_update)
+
+    # register in the HAF application registry; needs hivemind_app._batch_queue
+    # (massive_sync.sql above) for the completed-block function (haf#341)
+    from hive.indexer.hive_db.haf_functions import register_application
+    register_application(db)
 
 
 def perform_db_upgrade(db, admin_db):

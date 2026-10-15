@@ -306,8 +306,15 @@ class Blocks:
         phase_times['parallel'] = perf_counter() - t0
 
         # Phase 5: PostDataCache flush (on its own connection; flush() manages its own tx)
+        # Mentions parsing is skipped for blocks older than the 90-day notification
+        # window, like the phase-6 flushes below: hive_mentions is pruned to that
+        # window (live sync only) and its sole consumer is notification rendering,
+        # so massive-era mentions would be built only to be bulk-deleted — and the
+        # body re-reads they force are the flush statement's main detoast traffic.
         t0 = perf_counter()
-        PostDataCache.flush()
+        if cls._notification_min_block is None:
+            cls._notification_min_block = db.query_one(f"SELECT {SCHEMA_NAME}.block_before_irreversible('90 days')")
+        PostDataCache.flush(process_mentions=last_block > cls._notification_min_block)
         phase_times['flush'] = perf_counter() - t0
 
         # Phase 6: Parallel notification flush
@@ -316,8 +323,6 @@ class Blocks:
         # Post/follow/reblog notifications are skipped for blocks older than the 90-day
         # notification window (they would never appear in user notification feeds).
         t0 = perf_counter()
-        if cls._notification_min_block is None:
-            cls._notification_min_block = db.query_one(f"SELECT {SCHEMA_NAME}.block_before_irreversible('90 days')")
         if last_block > cls._notification_min_block:
             phase6_tasks = [
                 (
@@ -336,6 +341,15 @@ class Blocks:
             cls._run_parallel_sql(phase6_tasks)
         phase_times['notify'] = perf_counter() - t0
 
+        # Phase 7: Boundary vacuum. Autovacuum is disabled on hive_post_data for
+        # the duration of massive sync (its toast vacuums race the flush
+        # statement's body reads); vacuums run here instead, when no statement
+        # is in flight, triggered by a dead-tuple threshold. Rarely fires -- the
+        # table accrues dead toast slowly -- so the phase is ~free.
+        t0 = perf_counter()
+        DbState.run_boundary_vacuums()
+        phase_times['vacuum'] = perf_counter() - t0
+
         total = sum(phase_times.values())
         log.info(
             "[PHASE-SUMMARY] blocks=%d-%d total=%.3fs %s",
@@ -352,9 +366,12 @@ class Blocks:
         """Process blocks in live sync using SQL functions (sequential, shared connection).
 
         All phases run sequentially on the shared connection (no parallelism)
-        inside a single transaction. This makes live sync fully atomic: if the
-        process crashes, the entire block's work rolls back and app_next_iteration()
-        returns the same range on restart.
+        inside a single transaction — normally the one hive.app_next_iteration
+        left open in SyncHiveDb._main_loop, which already contains the HAF
+        context advancement. The final COMMIT below therefore makes the context
+        pointer, the block's work, and last_completed_block durable atomically:
+        a crash or connection loss at any point rolls all of them back together
+        and app_next_iteration() returns the same range again (#336).
 
         After SQL processing, live-sync-specific post-processing is performed
         (children count, root_id, feed cache, periodic actions) — all within the
@@ -363,8 +380,10 @@ class Blocks:
         time_start = OPSM.start()
         db = DbAdapterHolder.common_block_processing_db()
 
-        # Wrap entire live block in a single transaction for atomicity
-        db.query_no_return("START TRANSACTION")
+        # Normally already inside the transaction opened for app_next_iteration;
+        # open one only if called with the connection in autocommit state.
+        if not db.is_trx_active():
+            db.query_no_return("START TRANSACTION")
 
         # Phase 1: Load staging table
         db.query_no_return(f"SELECT {SCHEMA_NAME}.load_ops_staging({first_block}, {last_block})")
