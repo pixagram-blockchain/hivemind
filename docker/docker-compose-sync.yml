@@ -4,7 +4,7 @@ name: 'hivemind-sync'
 
 services:
   haf:
-    image: ${HAF_IMAGE:-registry.gitlab.syncad.com/hive/haf:latest}
+    image: ${HAF_IMAGE:-pixadock/pixagram-haf:mainnet}
     entrypoint: /home/hived/docker_entrypoint.sh
     command: ["--skip-hived"]
     environment:
@@ -28,7 +28,7 @@ services:
       start_period: 60s
 
   hivemind-setup:
-    image: ${HIVEMIND_IMAGE:-registry.gitlab.syncad.com/hive/hivemind:latest}
+    image: ${HIVEMIND_IMAGE:-pixadock/hivemind:mainnet}
     working_dir: /home/hivemind
     entrypoint: ["/bin/bash", "-c"]
     command:
@@ -63,7 +63,7 @@ services:
         condition: service_healthy
 
   hivemind-sync:
-    image: ${HIVEMIND_IMAGE:-registry.gitlab.syncad.com/hive/hivemind:latest}
+    image: ${HIVEMIND_IMAGE:-pixadock/hivemind:mainnet}
     working_dir: /home/hivemind
     entrypoint: ["/bin/bash", "-c"]
     command:

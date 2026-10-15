@@ -1,9 +1,9 @@
 [submodule "tests_api"]
 	path = tests/tests_api
-	url = https://gitlab.syncad.com/hive/tests_api.git
+	url = https://github.com/openhive-network/tests_api.git
 [submodule "reputation_tracker"]
 	path = reputation_tracker
-	url = https://gitlab.syncad.com/hive/reputation_tracker.git
+	url = https://github.com/openhive-network/reputation_tracker.git
 [submodule "hafah"]
 	path = hafah
-	url = https://gitlab.syncad.com/hive/HAfAH.git
+	url = https://github.com/openhive-network/HAfAH.git

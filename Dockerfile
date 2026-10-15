@@ -4,7 +4,8 @@
 
 ARG POSTGREST_VERSION=409108966606eba9e8f270c76dfb929cae65dba3
 
-FROM --platform=$TARGETPLATFORM registry.gitlab.syncad.com/hive/common-ci-configuration/postgrest:${POSTGREST_VERSION} AS pure_postgrest
+# Mirror of registry.gitlab.syncad.com/hive/common-ci-configuration/postgrest
+FROM --platform=$TARGETPLATFORM pixadock/postgrest:${POSTGREST_VERSION} AS pure_postgrest
 
 FROM --platform=$TARGETPLATFORM python:3.14-slim-bookworm as runtime
 
@@ -117,8 +118,8 @@ ARG GIT_LAST_COMMIT_DATE
 ARG COMMON_CI_REF=develop
 LABEL org.opencontainers.image.created="$BUILD_TIME"
 LABEL org.opencontainers.image.url="https://hive.io/"
-LABEL org.opencontainers.image.documentation="https://gitlab.syncad.com/hive/hivemind"
-LABEL org.opencontainers.image.source="https://gitlab.syncad.com/hive/hivemind"
+LABEL org.opencontainers.image.documentation="https://github.com/pixagram-blockchain/hivemind"
+LABEL org.opencontainers.image.source="https://github.com/pixagram-blockchain/hivemind"
 #LABEL org.opencontainers.image.version="${VERSION}"
 LABEL org.opencontainers.image.revision="$GIT_COMMIT_SHA"
 LABEL org.opencontainers.image.licenses="MIT"
@@ -163,7 +164,7 @@ COPY --from=builder --chown=hivemind:hivemind  /home/hivemind/app/scripts /home/
 # Fetch HAF scripts from common-ci-configuration (no submodule needed)
 COPY --chown=hivemind:hivemind --chmod=755 docker/haf_scripts/create_haf_app_role.sh /home/hivemind/haf/scripts/create_haf_app_role.sh
 COPY --chown=hivemind:hivemind --chmod=755 docker/haf_scripts/common.sh /home/hivemind/haf/scripts/common.sh
-ADD --chmod=755 https://gitlab.syncad.com/hive/common-ci-configuration/-/raw/${COMMON_CI_REF}/haf-app-tools/scripts/run_with_reconnect.sh /usr/local/bin/run_with_reconnect.sh
+ADD --chmod=755 https://raw.githubusercontent.com/openhive-network/common-ci-configuration/${COMMON_CI_REF}/haf-app-tools/scripts/run_with_reconnect.sh /usr/local/bin/run_with_reconnect.sh
 COPY --from=builder --chown=hivemind:hivemind  /home/hivemind/app/mock_data/block_data /home/hivemind/app/mock_data/block_data
 COPY --from=builder --chown=hivemind:hivemind  /home/hivemind/app/mock_data/vops_data /home/hivemind/app/mock_data/vops_data
 # No --exclude needed: reputation_tracker and hafah no longer have nested HAF submodules

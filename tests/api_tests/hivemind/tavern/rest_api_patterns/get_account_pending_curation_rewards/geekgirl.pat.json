@@ -1,0 +1,26 @@
+{
+  "account": "geekgirl",
+  "pending_vote_count": 1,
+  "curation_reward_basis": {
+    "liquid": {
+      "amount": "0",
+      "nai": "@@000000013",
+      "precision": 3
+    },
+    "vesting": {
+      "amount": "1",
+      "nai": "@@000000013",
+      "precision": 3
+    },
+    "direct": {
+      "amount": "0",
+      "nai": "@@000000013",
+      "precision": 3
+    },
+    "total": {
+      "amount": "1",
+      "nai": "@@000000013",
+      "precision": 3
+    }
+  }
+}

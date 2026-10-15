@@ -11,7 +11,13 @@ from typing import Optional
 import psycopg2.extensions
 
 import hive.db.schema as schema_module
-from hive.conf import ONE_WEEK_IN_BLOCKS, REPTRACKER_SCHEMA_NAME, SCHEMA_NAME, SCHEMA_OWNER_NAME, SWAGGER_URL
+from hive.conf import (
+    MASSIVE_WITHOUT_INDEXES_THRESHOLD_BLOCKS,
+    REPTRACKER_SCHEMA_NAME,
+    SCHEMA_NAME,
+    SCHEMA_OWNER_NAME,
+    SWAGGER_URL,
+)
 from hive.db.adapter import Db
 from hive.db.schema import perform_db_upgrade, setup, setup_runtime_code, teardown
 from hive.indexer.auto_db_disposer import AutoDbDisposer
@@ -40,6 +46,7 @@ class DbState:
     _original_full_page_writes = None
     _rshares_recalculated = False
     _wal_safety_disable_attempted = False  # Track if we already tried to disable WAL safety
+    _initial_sync = None  # Cached: True until the first finalization commits last_completed_block
 
     # Tables that have registered indexes (via register_indexes.sql)
     _TABLES_WITH_REGISTERED_INDEXES = [
@@ -69,6 +76,20 @@ class DbState:
     # Max retries for DDL operations that can deadlock with other HAF apps
     # (e.g. proxy-whitelist reading hivemind tables while hivemind drops FKs).
     _DDL_MAX_RETRIES = 5
+
+    # During massive sync, autovacuum on hive_post_data races the flush
+    # statement's toast reads of post bodies (missing/unexpected-chunk failures,
+    # #342 — every observed hit was this table), so it is disabled there and
+    # replaced by vacuums issued at chunk boundaries, when no flush statement is
+    # running. Scope is deliberately this one table: the other hot tables have no
+    # toast read path, and the 60-70M bed A/B measured their concurrent
+    # autovacuums as free in wall time while boundary vacuums of them cost 9.5%
+    # (563s of synchronous stalls). hive_post_data itself needed ~1 vacuum per
+    # 10M blocks, so serializing it costs nothing.
+    # Values are dead-tuple counts that trigger a vacuum at the next boundary.
+    MASSIVE_VACUUM_THRESHOLDS = {
+        'hive_post_data': 50000,
+    }
 
     @staticmethod
     def _retry_ddl(fn, description, max_retries=None):
@@ -384,6 +405,13 @@ class DbState:
         if cls._original_fsync is not None or cls._wal_safety_disable_attempted:
             return  # Already disabled or already attempted
 
+        if not cls.is_initial_sync():
+            # fsync=off is only tolerable when a crash means rebuilding from
+            # scratch anyway; on a database with committed state it risks real
+            # corruption for a marginal gain (WAL waits are <=2% of processing
+            # time per the #339 measurements).
+            return
+
         cls._wal_safety_disable_attempted = True
         admin = cls.admin_db()
         if admin is None:
@@ -435,20 +463,53 @@ class DbState:
         log.info("[MASSIVE] WAL safety features restored")
 
     @classmethod
+    def is_initial_sync(cls):
+        """True until the first massive finalization commits last_completed_block_num.
+
+        Gates the machinery that is only justified (and only safe) when the
+        database holds no irreplaceable state yet: UNLOGGED conversion, BM25
+        drop/rebuild, and WAL-safety disabling. Cached per process — a crash
+        during initial sync restarts with last_completed still 0, so the gate
+        re-engages correctly.
+        """
+        if cls._initial_sync is None:
+            last_completed = cls.db().query_one(f"SELECT last_completed_block_num FROM {SCHEMA_NAME}.hive_state")
+            # insert_seed_data() starts hive_state at last_completed_block_num = 1.
+            cls._initial_sync = (last_completed or 0) <= 1
+        return cls._initial_sync
+
+    @classmethod
     def ensure_indexes_are_disabled(cls):
         if cls._indexes_were_disabled:
             return
 
         cls._drop_indexes_in_threads()
 
-        # Drop BM25 index explicitly (not HAF-managed due to pg_search MetaPage issue).
-        # Must be dropped before UNLOGGED conversion. Safe on first run (IF EXISTS).
-        cls.db().query_no_return("DROP INDEX IF EXISTS hivemind_app.hive_post_data_bm25_idx")
+        if cls.is_initial_sync():
+            # UNLOGGED conversion (and the BM25 drop it requires) only pays for
+            # itself on initial sync: the round-trip costs ~6,600s + ~1,860s BM25
+            # rebuild on production-class hardware, while WAL waits are <=2% of
+            # with-indexes processing time (measurements in #339). It is also
+            # only *safe* here — a PostgreSQL crash truncates UNLOGGED tables,
+            # acceptable solely when the data can be rebuilt from scratch.
 
-        # Set tables to UNLOGGED for faster inserts (no WAL writes)
-        from hive.db.schema import set_logged_table_attribute
+            # Drop BM25 index explicitly (not HAF-managed due to pg_search MetaPage issue).
+            # Must be dropped before UNLOGGED conversion. Safe on first run (IF EXISTS).
+            cls.db().query_no_return("DROP INDEX IF EXISTS hivemind_app.hive_post_data_bm25_idx")
 
-        set_logged_table_attribute(cls.db(), False)
+            if cls._has_registered_tables():
+                # Registered tables keep their foreign keys, and PostgreSQL refuses to
+                # make a table UNLOGGED while it shares a foreign key with a logged one.
+                # The parallel conversion then fails or succeeds depending on lock order
+                # and kills the sync. Stay LOGGED; the later SET LOGGED is a no-op.
+                log.info("[MASSIVE] Tables are registered with HFM - keeping them LOGGED")
+            else:
+                # Set tables to UNLOGGED for faster inserts (no WAL writes)
+                from hive.db.schema import set_logged_table_attribute
+
+                set_logged_table_attribute(cls.db(), False)
+
+        cls.disable_autovacuum_for_massive_sync()
 
         cls._indexes_were_disabled = True
         cls._indexes_were_enabled = False
@@ -536,19 +597,18 @@ class DbState:
     @classmethod
     def _finish_hive_posts(cls, db, massive_sync_preconditions, last_imported_block, current_imported_block):
         with AutoDbDisposer(db, "finish_hive_posts") as db_mgr:
-            time_start = perf_counter()
-
             # UPDATE: `children`
+            # Only the initial-massive full recompute runs here: it is idempotent,
+            # so it is safe to repeat if finalization is interrupted before the
+            # completion marker commits. The ranged variant applies *deltas* and
+            # must commit exactly once — it runs inside the completion-marker
+            # transaction instead (_finalize_completion_marker).
             if massive_sync_preconditions:
-                # Update count of all child posts (what was hold during massive sync)
+                time_start = perf_counter()
                 cls._execute_query_with_modified_work_mem(
                     db=db_mgr.db, sql=f"SELECT {SCHEMA_NAME}.update_all_hive_posts_children_count()"
                 )
-            else:
-                # Update count of child posts processed during partial sync (what was hold during massive sync)
-                sql = f"SELECT {SCHEMA_NAME}.update_hive_posts_children_count({last_imported_block}, {current_imported_block})"
-                cls._execute_query_with_modified_work_mem(db=db_mgr.db, sql=sql)
-            log.info("[MASSIVE] update_hive_posts_children_count executed in %.4fs", perf_counter() - time_start)
+                log.info("[MASSIVE] update_hive_posts_children_count executed in %.4fs", perf_counter() - time_start)
 
             # UPDATE: `root_id`
             # Update root_id for all root posts (depth=0 posts have root_id temporarily set to 0 on INSERT)
@@ -562,14 +622,6 @@ class DbState:
                 )
             cls._execute_query_with_modified_work_mem(db=db_mgr.db, sql=sql)
             log.info("[MASSIVE] update_hive_posts_root_id executed in %.4fs", perf_counter() - time_start)
-
-            # Sanity check: no root posts should have root_id = 0 after finalization
-            broken = db_mgr.db.query_one(
-                f"SELECT COUNT(*) FROM {SCHEMA_NAME}.hive_posts WHERE root_id = 0 AND depth = 0 AND id != 0"
-            )
-            if broken:
-                log.error("[MASSIVE] CRITICAL: %d root posts still have root_id = 0 after finalization!", broken)
-                raise RuntimeError(f"Finalization failed: {broken} root posts have root_id = 0")
 
     @classmethod
     def _finish_hive_feed_cache(cls, db, last_imported_block, current_imported_block):
@@ -609,12 +661,54 @@ class DbState:
             )
 
     @classmethod
-    def _finish_blocks_consistency_flag(cls, db, last_imported_block, current_imported_block):
-        with AutoDbDisposer(db, "finish_blocks_consistency_flag") as db_mgr:
+    def _finalize_completion_marker(cls, db, massive_sync_preconditions, last_imported_block, current_imported_block):
+        """Commit the finalization completion marker — always the LAST write of finalization.
+
+        last_completed_block_num asserts "derived tables are consistent through
+        this block", so it must not become durable before the fills it certifies:
+        a crash mid-finalization would otherwise permanently strand blocks whose
+        fills rolled back, unrepairable because the restarted finalization
+        derives its range from this very marker (#337, and the same invariant as
+        #336 one layer down).
+
+        Everything in one transaction on a dedicated connection:
+        - the ranged children-count update (non-initial path only): it applies
+          deltas rather than absolute values, so it must commit exactly once —
+          binding it to the marker gives exactly-once across crash/restart.
+          All other fill tasks are idempotent and simply re-run on resume.
+        - the root_id sanity check: runs before the marker so a detected
+          inconsistency aborts finalization with the marker unset and the next
+          startup retries the full range.
+        - update_last_completed_block itself.
+        """
+        with AutoDbDisposer(db, "finalize_completion_marker") as db_mgr:
             time_start = perf_counter()
-            sql = f"SELECT {SCHEMA_NAME}.update_last_completed_block({current_imported_block});"
-            cls._execute_query_with_modified_work_mem(db=db_mgr.db, sql=sql)
-            log.info("[MASSIVE] update_last_completed_block executed in %.4fs", perf_counter() - time_start)
+            db_mgr.db.query("START TRANSACTION")
+            try:
+                if not massive_sync_preconditions:
+                    # Update count of child posts processed during partial sync (what was held during massive sync)
+                    sql = f"SELECT {SCHEMA_NAME}.update_hive_posts_children_count({last_imported_block}, {current_imported_block})"
+                    cls._execute_query_with_modified_work_mem(db=db_mgr.db, sql=sql, separate_transaction=False)
+
+                # Sanity check: no root posts should have root_id = 0 after finalization
+                broken = db_mgr.db.query_one(
+                    f"SELECT COUNT(*) FROM {SCHEMA_NAME}.hive_posts WHERE root_id = 0 AND depth = 0 AND id != 0"
+                )
+                if broken:
+                    log.error("[MASSIVE] CRITICAL: %d root posts still have root_id = 0 after finalization!", broken)
+                    raise RuntimeError(f"Finalization failed: {broken} root posts have root_id = 0")
+
+                db_mgr.db.query_no_return(
+                    f"SELECT {SCHEMA_NAME}.update_last_completed_block({current_imported_block});"
+                )
+                db_mgr.db.query("COMMIT")
+            except Exception:
+                try:
+                    db_mgr.db.query("ROLLBACK")
+                except Exception:
+                    log.warning("Ignoring ROLLBACK failure while aborting finalization", exc_info=True)
+                raise
+            log.info("[MASSIVE] finalization completion marker committed in %.4fs", perf_counter() - time_start)
 
     @classmethod
     def _finish_posts_rshares(cls, db):
@@ -651,6 +745,33 @@ class DbState:
             db_mgr.db.query("COMMIT")
             log.info(
                 "[MASSIVE] flush_vote_notifications: %s notifications in %.4fs", result, perf_counter() - time_start
+            )
+
+    @classmethod
+    def _finish_vote_notifications_ranged(cls, db, last_imported_block, current_imported_block):
+        """Backfill vote notifications for the range a short massive catch-up covered.
+
+        Massive batches skip vote notifications (scoring needs payout data), and
+        only the initial-massive finalization ran the full backfill — so every
+        catch-up below the initial threshold silently lost its range's vote
+        notifications (#338). The flush is idempotent (ON CONFLICT DO NOTHING)
+        and windowed to the 90-day notification horizon inside the SQL.
+        """
+        with AutoDbDisposer(db, "finish_vote_notifications_ranged") as db_mgr:
+            time_start = perf_counter()
+            db_mgr.db.query("START TRANSACTION")
+            sql = (
+                f"SELECT {SCHEMA_NAME}.flush_vote_notifications_for_blocks("
+                f"{last_imported_block + 1}, {current_imported_block})"
+            )
+            result = db_mgr.db.query_one(sql)
+            db_mgr.db.query("COMMIT")
+            log.info(
+                "[MASSIVE] flush_vote_notifications (%d..%d): %s notifications in %.4fs",
+                last_imported_block + 1,
+                current_imported_block,
+                result,
+                perf_counter() - time_start,
             )
 
     @classmethod
@@ -722,10 +843,40 @@ class DbState:
         log.info(f'{info} Real elapsed time: {perf_counter() - start_time:.3f}, completed threads: {completedThreads}')
 
     @classmethod
+    def _interrupted(cls, phase):
+        """True when a shutdown was requested; finalization stops at task boundaries.
+
+        Safe at any boundary: the completion marker only commits at the very end
+        (_finalize_completion_marker), so an interrupted finalization is retried
+        with the same range on the next startup, and every task that may have
+        already committed is idempotent under that re-run.
+        """
+        from hive.signals import can_continue_thread
+
+        if can_continue_thread():
+            return False
+        log.warning(
+            "[MASSIVE] Shutdown requested — stopping finalization before %s. "
+            "The completion marker is not set; finalization will resume from the same range on next startup.",
+            phase,
+        )
+        return True
+
+    @classmethod
     def _finish_all_tables(cls, massive_sync_preconditions, last_imported_block, current_imported_block):
+        """Fill derived tables after massive sync. Returns True when finalization completed.
+
+        Ordering contract: all fill tasks run (idempotently re-runnable) BEFORE
+        _finalize_completion_marker commits last_completed_block_num as the very
+        last write. Never add a task after the marker, and never let a task
+        commit the marker early — see #337 for the incident this prevents.
+        """
         start_time = FOSM.start()
 
         log.info("#############################################################################")
+
+        if cls._interrupted("rshares recalculation"):
+            return False
 
         if massive_sync_preconditions and not cls._rshares_recalculated:
             # Run rshares recalculation first (creates ~54M dead tuples on hive_posts).
@@ -739,17 +890,15 @@ class DbState:
             cls.vacuum_tables_in_threads([f"{SCHEMA_NAME}.hive_posts"])
             cls._rshares_recalculated = True
 
+        if cls._interrupted("Part 0 fills"):
+            return False
+
         methods = [
             ('hive_feed_cache', cls._finish_hive_feed_cache, [cls.db(), last_imported_block, current_imported_block]),
             (
                 'hive_posts',
                 cls._finish_hive_posts,
                 [cls.db(), massive_sync_preconditions, last_imported_block, current_imported_block],
-            ),
-            (
-                'blocks_consistency_flag',
-                cls._finish_blocks_consistency_flag,
-                [cls.db(), last_imported_block, current_imported_block],
             ),
         ]
         if massive_sync_preconditions:
@@ -758,6 +907,16 @@ class DbState:
                 ('communities_posts_and_rank', cls._finish_communities_posts_and_rank, [cls.db()]),
                 ('muted_parents', cls._finish_muted_parents, [cls.db()]),
             ]
+        else:
+            # The initial path backfills vote notifications in Part 1; short
+            # catch-ups must backfill their own range or lose it forever (#338).
+            methods.append(
+                (
+                    'vote_notifications',
+                    cls._finish_vote_notifications_ranged,
+                    [cls.db(), last_imported_block, current_imported_block],
+                )
+            )
         # BM25 index creation is deferred from the index phase to here, running in
         # parallel with the fills above. Takes ~31min but is hidden inside Part 0
         # which takes ~48min, eliminating it from the critical path.
@@ -765,6 +924,9 @@ class DbState:
         cls.process_tasks_in_threads("[MASSIVE] %i threads finished filling tables. Part nr 0", methods)
 
         if massive_sync_preconditions:
+            if cls._interrupted("Part 1 notification fills"):
+                return False
+
             methods = [
                 ('notification_cache', cls._finish_notification_cache, [cls.db()]),
                 ('vote_notifications', cls._finish_vote_notifications, [cls.db()]),
@@ -777,6 +939,15 @@ class DbState:
             # to hive_notification_cache with the tasks above.
             cls._finish_reputation_notification_scores(cls.db())
 
+        if cls._interrupted("completion marker"):
+            return False
+
+        # The very last write: ranged children delta (non-initial), root_id sanity
+        # check, and last_completed_block_num, atomically.
+        cls._finalize_completion_marker(
+            cls.db(), massive_sync_preconditions, last_imported_block, current_imported_block
+        )
+
         real_time = FOSM.stop(start_time)
 
         log.info("=== FILLING FINAL DATA INTO TABLES ===")
@@ -786,6 +957,52 @@ class DbState:
         )
         FOSM.clear()
         log.info("=== FILLING FINAL DATA INTO TABLES ===")
+        return True
+
+    @classmethod
+    def disable_autovacuum_for_massive_sync(cls):
+        """Hand vacuum scheduling of the race-prone table(s) over to boundary vacuums."""
+        for table in cls.MASSIVE_VACUUM_THRESHOLDS:
+            cls.db().query_no_return(
+                f"ALTER TABLE {SCHEMA_NAME}.{table} SET (autovacuum_enabled = off, toast.autovacuum_enabled = off)"
+            )
+        log.info("[MASSIVE] Autovacuum disabled on %s; boundary vacuums take over", list(cls.MASSIVE_VACUUM_THRESHOLDS))
+
+    @classmethod
+    def restore_autovacuum_after_massive_sync(cls):
+        for table in cls.MASSIVE_VACUUM_THRESHOLDS:
+            cls.db().query_no_return(
+                f"ALTER TABLE {SCHEMA_NAME}.{table} RESET (autovacuum_enabled, toast.autovacuum_enabled)"
+            )
+        log.info("[MASSIVE] Autovacuum reloptions restored on %s", list(cls.MASSIVE_VACUUM_THRESHOLDS))
+
+    @classmethod
+    def run_boundary_vacuums(cls):
+        """Vacuum any watched table whose dead tuples exceed its threshold.
+
+        Called between chunks with no flush statement in flight; plain VACUUM
+        (visibility map limits it to recently-churned pages, and the heavy
+        indexes are dropped during massive sync anyway).
+        """
+        names = ','.join(f"'{t}'" for t in cls.MASSIVE_VACUUM_THRESHOLDS)
+        rows = cls.db().query_all(
+            f"SELECT relname, n_dead_tup FROM pg_stat_user_tables WHERE schemaname = '{SCHEMA_NAME}' AND relname IN ({names})"
+        )
+        due = [
+            row._mapping['relname']
+            for row in rows
+            if row._mapping['n_dead_tup'] >= cls.MASSIVE_VACUUM_THRESHOLDS[row._mapping['relname']]
+        ]
+        if not due:
+            return []
+
+        def vacuum_table(table, db):
+            with AutoDbDisposer(db, "boundary_vacuum") as db_mgr:
+                db_mgr.db.query_no_return_autocommit(f"VACUUM {SCHEMA_NAME}.{table}")
+
+        methods = [('VACUUM ' + table, vacuum_table, [table, cls.db()]) for table in due]
+        cls.process_tasks_in_threads("Boundary vacuum on hivemind tables", methods)
+        return due
 
     @classmethod
     def vacuum_tables_in_threads(cls, tables):
@@ -825,12 +1042,26 @@ WHERE table_schema = '{SCHEMA_NAME}' AND table_type = 'BASE TABLE'
             if cls.db().is_trx_active():
                 cls.db().query_no_return("COMMIT")
 
-            is_initial_massive = (last_imported_blocks - last_completed_blocks) > ONE_WEEK_IN_BLOCKS
+            # Idempotent on purpose: after a crash the process-local state is gone
+            # but the reloptions persist, so always RESET them at finalization.
+            cls.restore_autovacuum_after_massive_sync()
+
+            # A sync from scratch always needs the full-recompute path (community rank,
+            # payout stats, notification cache), even on a chain shorter than the
+            # threshold: Pixagram's whole chain is ~1.2M blocks, under the 2M default.
+            is_initial_massive = (
+                cls.is_initial_sync()
+                or (last_imported_blocks - last_completed_blocks) > MASSIVE_WITHOUT_INDEXES_THRESHOLD_BLOCKS
+            )
 
             if is_initial_massive:
                 cls.vacuum_all_hivemind_tables_in_threads()
 
-            cls._finish_all_tables(is_initial_massive, last_completed_blocks, last_imported_blocks)
+            if not cls._finish_all_tables(is_initial_massive, last_completed_blocks, last_imported_blocks):
+                # Interrupted by a shutdown request before the completion marker
+                # was committed; the next startup re-runs finalization with the
+                # same range. Skip the post-finalization vacuums.
+                return True
 
             if is_initial_massive:
                 cls.vacuum_tables_in_threads(

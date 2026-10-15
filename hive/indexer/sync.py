@@ -2,10 +2,13 @@
 
 import ast
 import logging
+import sys
 import time
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from time import perf_counter as perf
+
+import psycopg2
 
 from hive.conf import SCHEMA_NAME, Conf
 from hive.db.adapter import Db
@@ -47,6 +50,7 @@ class SyncHiveDb:
         self._ubound = None
         self._databases = None
         self.time_start = None
+        self._live_prepared = False
 
         self._massive_consume_blocks_futures = None
         self._massive_consume_blocks_thread_pool = ThreadPoolExecutor(max_workers=1)
@@ -57,6 +61,28 @@ class SyncHiveDb:
             log.info("Entering HAF mode synchronization")
 
         set_custom_signal_handlers()
+
+        # Coordinate with other hivemind processes via Postgres advisory locks.
+        # The lock is held on self._db's persistent connection for the lifetime
+        # of this process; on shutdown / crash the connection drops and Postgres
+        # releases the lock automatically.
+        if self._enter_sync:
+            # Block-processor: take a SHARED lock on hivemind itself and on
+            # every upstream app whose schema this sync reads at runtime --
+            # currently reputation_tracker (reptracker_app referenced from
+            # massive_sync.sql and hive_post_operations.sql). Blocks (with
+            # NOTICE logging every minute) until any active installer of
+            # those apps releases its EXCLUSIVE lock.
+            self._db.query_no_return_autocommit(
+                "SELECT hive.acquire_app_block_processor_locks(ARRAY['hivemind', 'reputation_tracker'])"
+            )
+        else:
+            # Installer (build_schema / upgrade_schema): try EXCLUSIVE lock.
+            # If a block-processor is holding the shared lock the function
+            # NOTICEs the holder and returns false; skip rather than racing.
+            if not self._db.query_one("SELECT hive.try_acquire_app_install_lock('hivemind')"):
+                log.info("Skipping hivemind schema install (see NOTICE above).")
+                sys.exit(0)
 
         Community.start_block = self._conf.get("community_start_block")
         DbState.initialize(self._enter_sync, self._upgrade_schema)
@@ -76,7 +102,15 @@ class SyncHiveDb:
         if self._enter_sync:
             log.info("Exiting HAF mode synchronization")
 
-            PayoutStats.generate(self._db, separate_transaction=True)
+            try:
+                PayoutStats.generate(self._db, separate_transaction=True)
+            except Exception:
+                # A failed cleanup (typically a dead DB connection — often the
+                # very thing that brought us here) must not mask the original
+                # exception with an unrelated traceback.
+                if exc_type is None:
+                    raise
+                log.warning("Skipping payout_stats_view refresh during abnormal shutdown", exc_info=True)
 
             last_imported_block = Blocks.last_imported()
             log.info(f'LAST IMPORTED BLOCK IS: {last_imported_block}')
@@ -103,11 +137,20 @@ class SyncHiveDb:
         # to open flush connections — otherwise we'd kill our own fresh connections.
         self._terminate_stale_connections()
 
+        # Detect data loss from UNLOGGED tables after a PostgreSQL crash.
+        # Must run before _replay_crashed_batch: if PostgreSQL truncated the
+        # UNLOGGED tables while a batch was in flight, replaying that batch
+        # against empty tables fails before the reset logic would ever run,
+        # crash-looping the process.
+        self._check_unlogged_data_consistency()
+
         # Check for unfinished batch from prior crash
         self._replay_crashed_batch()
 
-        # Detect data loss from UNLOGGED tables after a PostgreSQL crash
-        self._check_unlogged_data_consistency()
+        # Detect (and when safe, heal) a live block skipped by a pre-#336-fix
+        # process. Must run before ensure_finalize_massive_sync, which erases
+        # the last_imported/last_completed mismatch that is the only evidence.
+        self._recover_skipped_live_blocks()
 
         def report_enter_to_stage(current_stage) -> bool:
             if (
@@ -129,6 +172,19 @@ class SyncHiveDb:
         active_connections_before = self._get_active_db_connections()
         SyncHiveDb.time_start = OPSM.start()
 
+        while True:
+            try:
+                self._main_loop(report_enter_to_stage, active_connections_before)
+                return
+            except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+                # Massive sync flushes batches from separate threads and
+                # connections; resuming it in-process is not safe. A process
+                # restart replays the unfinished batch via _batch_queue instead.
+                if DbState.is_massive_sync():
+                    raise
+                self._recover_from_disconnect(e)
+
+    def _main_loop(self, report_enter_to_stage, active_connections_before) -> None:
         while True:
             # Wait for previous massive consumption BEFORE modifying context state.
             # This prevents race condition where flush threads access context while
@@ -161,28 +217,34 @@ class SyncHiveDb:
             if self._lbound is None:
                 if application_stage == 'wait_for_haf':
                     report_enter_to_stage(application_stage)
+                self._idle_until_new_block(application_stage)
                 continue
 
             # app_next_iteration updated the HAF context and recreated the
             # operations_view / blocks_view, but all of that is still inside an
-            # uncommitted transaction on self._db.  We MUST commit here because
-            # massive sync runs load_ops_staging on a *separate* DB connection
-            # (the cloned massive_instance) which cannot see uncommitted DDL
-            # changes from this session — without this commit the operations_view
-            # would show the old block range and the batch would find no ops.
+            # uncommitted transaction on self._db.
             #
-            # For massive sync stages, insert the block range into _batch_queue
+            # Massive sync MUST commit here because it runs load_ops_staging on a
+            # *separate* DB connection (the cloned massive_instance) which cannot
+            # see uncommitted DDL changes from this session — without this commit
+            # the operations_view would show the old block range and the batch
+            # would find no ops.  The block range is inserted into _batch_queue
             # BEFORE committing so the context advancement and the crash-recovery
-            # marker are committed atomically.  Without this, a crash between the
-            # commit and _process_massive_blocks leaves the context advanced past
-            # blocks that were never processed and no batch_queue entry to trigger
-            # replay on restart.
+            # marker are committed atomically; a crash mid-batch is then replayed
+            # from _batch_queue on restart.
+            #
+            # Live sync must NOT commit here: the block's entire work runs on
+            # this same connection, and process_live_block_sql's final COMMIT
+            # makes the context advancement, the block's work, and
+            # last_completed_block durable atomically.  Committing the pointer
+            # early opened a window where a mid-block connection loss skipped
+            # the block forever (#336).
             if application_stage in ("MASSIVE_WITHOUT_INDEXES", "MASSIVE_WITH_INDEXES"):
                 self._db.query_no_return(
                     f"INSERT INTO {SCHEMA_NAME}._batch_queue (first_block, last_block) "
                     f"VALUES ({self._lbound}, {self._ubound})"
                 )
-            self._db.query_no_return("COMMIT")
+                self._db.query_no_return("COMMIT")
             if application_stage == "MASSIVE_WITHOUT_INDEXES":
                 DbState.set_massive_sync(True)
                 report_enter_to_stage(application_stage)
@@ -211,15 +273,26 @@ class SyncHiveDb:
                 DbState.set_massive_sync(False)
                 report_enter_to_stage(application_stage)
 
-                DbState.ensure_on_synchronous_commit()
-                DbState.ensure_indexes_are_enabled()
-                DbState.restore_wal_safety_after_massive_sync()
-                DbState.close_admin_db()  # No longer needed after massive sync
+                if not self._live_prepared or last_imported_block > Blocks.last_completed():
+                    # First live iteration (fresh start or massive→live
+                    # transition): the ensure_*/finalization steps below run DDL
+                    # and COMMIT on the shared connection.  Roll back the open
+                    # pointer advance first so it can never become durable ahead
+                    # of the block's work (#336); the same range is re-taken on
+                    # the next iteration and processed atomically.
+                    self._db.query_no_return("ROLLBACK")
 
-                if DbState.ensure_finalize_massive_sync(last_imported_block, Blocks.last_completed()):
-                    self.print_summary()
+                    DbState.ensure_on_synchronous_commit()
+                    DbState.ensure_indexes_are_enabled()
+                    DbState.restore_wal_safety_after_massive_sync()
+                    DbState.close_admin_db()  # No longer needed after massive sync
 
-                DbState.ensure_fk_are_enabled()
+                    if DbState.ensure_finalize_massive_sync(last_imported_block, Blocks.last_completed()):
+                        self.print_summary()
+
+                    DbState.ensure_fk_are_enabled()
+                    self._live_prepared = True
+                    continue
 
                 log.info("[SINGLE] *** SINGLE block processing***")
 
@@ -227,6 +300,40 @@ class SyncHiveDb:
             else:
                 self._on_stop_synchronization(active_connections_before)
                 raise AssertionError(f'Unknown application stage {application_stage}')
+
+    RECONNECT_DELAY_SECONDS = 5
+
+    def _recover_from_disconnect(self, cause: Exception) -> None:
+        """Re-establish the shared DB connection after the server dropped it.
+
+        Losing the session rolls back the in-flight transaction INCLUDING the
+        HAF context advancement done by hive.app_next_iteration (in live mode
+        the pointer is only committed together with the block's work — see the
+        massive-only COMMIT in _main_loop, #336), so after reconnecting the
+        loop resumes exactly after the last committed block — the same
+        guarantee the run_with_reconnect.sh wrapper relies on for the SQL-loop
+        HAF apps (see haf#321). Postgres drops sessions on a restart and via
+        idle_in_transaction_session_timeout when this process stalls (e.g. the
+        swap-thrash freezes observed on API nodes); both land here.
+        """
+        log.warning("Database connection lost; reconnecting...", exc_info=True)
+        attempt = 0
+        while can_continue_thread():
+            attempt += 1
+            try:
+                self._db.reconnect()
+                # The advisory locks acquired in __enter__ died with the old
+                # session; re-acquire them before touching hivemind state again.
+                self._db.query_no_return_autocommit(
+                    "SELECT hive.acquire_app_block_processor_locks(ARRAY['hivemind', 'reputation_tracker'])"
+                )
+                log.warning(f"Reconnected to the database after {attempt} attempt(s); resuming synchronization")
+                return
+            except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+                log.warning(f"Reconnect attempt {attempt} failed: {e}; retrying in {self.RECONNECT_DELAY_SECONDS}s")
+                time.sleep(self.RECONNECT_DELAY_SECONDS)
+        # Interrupted while reconnecting — surface the original disconnection.
+        raise cause
 
     def _replay_crashed_batch(self):
         """Check for and replay any unfinished batch from a prior crash.
@@ -252,6 +359,76 @@ class SyncHiveDb:
         self._db.query_no_return(f"DELETE FROM {SCHEMA_NAME}._batch_queue")
         self._db.query_no_return("COMMIT")
         log.info(f"Crash recovery: batch {first_block}..{last_block} replayed successfully")
+
+    def _recover_skipped_live_blocks(self):
+        """Detect a live block whose work was lost while the context advanced past it.
+
+        Before the pointer commit was made massive-only (#336), a mid-block
+        connection loss in live sync committed the HAF context advancement
+        while the block's work rolled back; on restart the block was silently
+        skipped forever. The mismatch (last_imported > last_completed with no
+        pending batch) is that failure's only durable signal — and the first
+        live iteration erases it via ensure_finalize_massive_sync — so this
+        must run before the main loop.
+
+        When the gap is unambiguously the live-skip signature, rewind the
+        context to last_completed so the lost blocks are re-processed; the
+        lost work rolled back atomically, so re-processing collides with
+        nothing. Rewind failures are logged and ignored — the WARNING is
+        always emitted and startup is never blocked.
+        """
+        last_imported = Blocks.last_imported()
+        last_completed = Blocks.last_completed()
+        gap = last_imported - last_completed
+        if gap <= 0:
+            return
+
+        if self._db.query_one(f"SELECT EXISTS(SELECT 1 FROM {SCHEMA_NAME}._batch_queue)"):
+            return  # in-flight massive batch: _replay_crashed_batch owns this gap
+
+        # During massive sync last_completed legitimately lags by huge amounts
+        # (it only advances at finalization); only a small gap while the app is
+        # in the live stage is the skipped-block signature.
+        stage = self._db.query_one(f"SELECT hive.get_current_stage_name('{SCHEMA_NAME}')")
+        if stage != 'live' or gap > (self._max_batch or 1000):
+            return
+
+        log.warning(
+            "Detected %d live block(s) whose work was never committed: the HAF "
+            "context is at block %d but the last completed block is %d. Blocks "
+            "%d..%d were skipped by a previous process (see hivemind#336).",
+            gap,
+            last_imported,
+            last_completed,
+            last_completed + 1,
+            last_imported,
+        )
+
+        try:
+            was_attached = self._db.query_one(
+                "SELECT hca.is_attached FROM hafd.contexts_attachment hca "
+                f"JOIN hafd.contexts hc ON hc.id = hca.context_id WHERE hc.name = '{SCHEMA_NAME}'"
+            )
+            if was_attached:
+                self._db.query_no_return(f"SELECT hive.app_context_detach('{SCHEMA_NAME}')")
+            self._db.query_no_return(f"SELECT hive.app_set_current_block_num('{SCHEMA_NAME}', {last_completed})")
+            if was_attached:
+                self._db.query_no_return(f"SELECT hive.app_context_attach('{SCHEMA_NAME}')")
+            log.warning(
+                "Rewound the HAF context to block %d; blocks %d..%d will be re-processed.",
+                last_completed,
+                last_completed + 1,
+                last_imported,
+            )
+        except Exception:
+            log.warning(
+                "Could not rewind the HAF context to block %d; blocks %d..%d remain "
+                "missing from hivemind data and need a manual backfill.",
+                last_completed,
+                last_completed + 1,
+                last_imported,
+                exc_info=True,
+            )
 
     def _check_unlogged_data_consistency(self):
         """Detect and recover from UNLOGGED table data loss after a PostgreSQL crash.
@@ -392,8 +569,11 @@ class SyncHiveDb:
         if self._max_batch:
             batch = self._max_batch
 
+        # _wait => FALSE: an empty iteration returns at once instead of waiting
+        # inside the database for the next block; _idle_until_new_block waits on
+        # this side, with the backend idle and no transaction open (haf#341).
         result = self._db.query_one(
-            f"CALL hive.app_next_iteration( _contexts => ARRAY['{SCHEMA_NAME}' ]::hive.contexts_group, _blocks_range => (0,0), _limit => {limit}, _override_max_batch => {batch} )"
+            f"CALL hive.app_next_iteration( _contexts => ARRAY['{SCHEMA_NAME}' ]::hive.contexts_group, _blocks_range => (0,0), _limit => {limit}, _override_max_batch => {batch}, _wait => FALSE )"
         )
 
         self._db._trx_active = True
@@ -411,6 +591,27 @@ class SyncHiveDb:
 
         return lbound, ubound
 
+    IDLE_POLL_SECONDS = 0.5      # while HAF is not ready / massive sync starves
+    LIVE_SAFETY_WAIT_SECONDS = 15.0  # live: NOTIFY wakes us; this is the fallback
+
+    def _idle_until_new_block(self, application_stage) -> None:
+        """Wait for the next block after an empty iteration (haf#341).
+
+        Nothing is done in the database while waiting: the empty iteration's
+        transaction is rolled back (it only carried the heartbeat and no
+        position change), and in live sync the connection idles on the socket
+        until HAF's NOTIFY for a new block. Outside live sync (waiting for HAF,
+        or massive sync momentarily ahead of the irreversible head) a short
+        sleep is used instead - those states do not notify.
+        """
+        if self._db.is_trx_active():
+            self._db.query_no_return("ROLLBACK")
+        if application_stage == 'live':
+            self._db.listen_for_blocks()
+            self._db.wait_for_block_notification(self.LIVE_SAFETY_WAIT_SECONDS)
+        else:
+            time.sleep(self.IDLE_POLL_SECONDS)
+
     def _process_live_blocks(self, lbound, ubound, active_connections_before):
         log.info(f"[SINGLE] Attempting to process blocks in range: <{lbound}:{ubound}>")
 
@@ -419,7 +620,7 @@ class SyncHiveDb:
             Blocks.close_own_db_access()
             self._terminate_stale_connections()
             # Wait for pg_stat_activity to reflect closed connections before
-            # establishing baseline (see hivemind issue #207)
+            # establishing baseline (see hivemind issues #207 and #343)
             active_connections_before = self._wait_for_stable_connections()
             Blocks.setup_own_db_access(shared_db_adapter=self._db)
 
@@ -577,9 +778,27 @@ class SyncHiveDb:
 
         return 1
 
-    def _get_active_db_connections(self):
-        sql = "SELECT application_name FROM pg_stat_activity WHERE application_name LIKE 'hivemind_%';"
+    def _query_hivemind_connections(self, exclude_pid=None) -> list:
+        """Return the application_name of every hivemind_* backend, from a fresh read.
+
+        pg_stat_activity is served from a per-transaction cache: the first read
+        inside a transaction is frozen until COMMIT/ROLLBACK.  Live mode keeps
+        the app_next_iteration transaction open across the massive->live
+        handoff (#336), so without clearing the snapshot every poll in the
+        stale-connection sweep and the baseline capture would return the same
+        stale rows -- a worker backend still tearing down a millisecond after
+        close() would be frozen into the baseline and then "vanish" (#343).
+        A separate statement on purpose: bundling pg_stat_clear_snapshot()
+        into the SELECT gives no evaluation-order guarantee.
+        """
+        self._db.query_no_return("SELECT pg_stat_clear_snapshot()")
+        sql = "SELECT application_name FROM pg_stat_activity WHERE application_name LIKE 'hivemind_%'"
+        if exclude_pid is not None:
+            sql += f" AND pid != {exclude_pid}"
         return self._db.query_col(sql)
+
+    def _get_active_db_connections(self):
+        return self._query_hivemind_connections()
 
     def _terminate_stale_connections(self):
         """Terminate lingering hivemind connections from previous crashed instances.
@@ -589,6 +808,9 @@ class SyncHiveDb:
         assertion to fail when compared against the post-processing snapshot.
         """
         our_pid = self._db.query_one("SELECT pg_backend_pid();")
+        # Fresh read, so backends that already disconnected are not "terminated"
+        # (see _query_hivemind_connections).
+        self._db.query_no_return("SELECT pg_stat_clear_snapshot()")
         terminated = self._db.query_all(
             f"SELECT pg_terminate_backend(pid), application_name "
             f"FROM pg_stat_activity "
@@ -600,11 +822,7 @@ class SyncHiveDb:
             # Wait for terminated backends to fully disappear from pg_stat_activity
             for _ in range(50):
                 time.sleep(0.1)
-                remaining = self._db.query_all(
-                    f"SELECT application_name FROM pg_stat_activity "
-                    f"WHERE application_name LIKE 'hivemind_%%' "
-                    f"AND pid != {our_pid};"
-                )
+                remaining = self._query_hivemind_connections(exclude_pid=our_pid)
                 if not remaining:
                     break
             if remaining:
@@ -612,14 +830,21 @@ class SyncHiveDb:
 
     @staticmethod
     def _assert_connections_closed(connections_before: Iterable, connections_after: Iterable) -> None:
-        assert_message = (
-            f'Some db connections used in '
+        """Fail if block processing left behind a connection that was not in the baseline.
+
+        Only *new* names are a leak.  A name that was in the baseline and is
+        gone afterwards is not: a backend that finished tearing down during the
+        block, or an orderly full disconnect at shutdown, must not abort the
+        process (#343).
+        """
+        leaked = set(connections_after) - set(connections_before)
+        assert not leaked, (
+            f'Db connections opened during '
             f'{"LIVE" if DbLiveContextHolder.is_live_context() else "MASSIVE"} sync were not closed!\n'
+            f'leaked: {sorted(leaked)}\n'
             f'before: {connections_before}\n'
             f'after: {connections_after}'
         )
-
-        assert set(connections_before) == set(connections_after), assert_message
 
     def _wait_for_stable_connections(self, timeout_seconds: float = 1.0) -> list:
         """Poll pg_stat_activity until connection state stabilizes.

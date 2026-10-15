@@ -189,6 +189,97 @@ declare
         "items": {
           "$ref": "#/components/schemas/hivemind_endpoints.reblog_status"
         }
+      },
+      "hivemind_endpoints.asset": {
+        "type": "object",
+        "x-sql-datatype": "JSON",
+        "properties": {
+          "amount": {
+            "type": "string",
+            "description": "Asset amount in raw integer units (multiply by 10^-precision to get the decimal amount)"
+          },
+          "precision": {
+            "type": "integer",
+            "description": "Decimal precision for the NAI asset"
+          },
+          "nai": {
+            "type": "string",
+            "description": "Numeric Asset Identifier"
+          }
+        }
+      },
+      "hivemind_endpoints.pending_reward_basis": {
+        "type": "object",
+        "x-sql-datatype": "JSON",
+        "properties": {
+          "liquid": {
+            "$ref": "#/components/schemas/hivemind_endpoints.asset",
+            "description": "HBD-denominated reward basis routed to liquid payout; final HBD/HIVE split requires exact hbd_print_rate outside Hivemind"
+          },
+          "vesting": {
+            "$ref": "#/components/schemas/hivemind_endpoints.asset",
+            "description": "HBD-denominated reward basis routed to HP/VESTS; final VESTS amount requires exact reward vesting state outside Hivemind"
+          },
+          "direct": {
+            "$ref": "#/components/schemas/hivemind_endpoints.asset",
+            "description": "HBD-denominated reward basis for direct-HBD paths such as treasury beneficiaries"
+          },
+          "total": {
+            "$ref": "#/components/schemas/hivemind_endpoints.asset",
+            "description": "Sum of the visible liquid, vesting, and direct HBD-denominated reward-basis buckets"
+          }
+        }
+      },
+      "hivemind_endpoints.pending_author_rewards": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": "string",
+            "description": "Account name"
+          },
+          "pending_post_count": {
+            "type": "integer",
+            "description": "Number of posts awaiting payout"
+          },
+          "gross_reward_basis": {
+            "$ref": "#/components/schemas/hivemind_endpoints.asset",
+            "x-sql-datatype": "JSON",
+            "description": "Sum of pending reward basis across all unpaid posts, capped by max_accepted_payout"
+          },
+          "author_reward_basis": {
+            "$ref": "#/components/schemas/hivemind_endpoints.pending_reward_basis",
+            "x-sql-datatype": "JSON",
+            "description": "Author reward basis after beneficiary split; not final HBD/HIVE/VESTS payout"
+          },
+          "beneficiaries_reward_basis": {
+            "$ref": "#/components/schemas/hivemind_endpoints.pending_reward_basis",
+            "x-sql-datatype": "JSON",
+            "description": "Beneficiary reward basis, including direct-HBD treasury beneficiary basis when present; not final HBD/HIVE/VESTS payout"
+          },
+          "curators_reward_basis": {
+            "$ref": "#/components/schemas/hivemind_endpoints.pending_reward_basis",
+            "x-sql-datatype": "JSON",
+            "description": "Curator reward basis for the account''s posts; curation resolves to HP/VESTS outside Hivemind"
+          }
+        }
+      },
+      "hivemind_endpoints.pending_curation_rewards": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": "string",
+            "description": "Account name"
+          },
+          "pending_vote_count": {
+            "type": "integer",
+            "description": "Number of recent votes awaiting payout (within the last 8 chain-days)"
+          },
+          "curation_reward_basis": {
+            "$ref": "#/components/schemas/hivemind_endpoints.pending_reward_basis",
+            "x-sql-datatype": "JSON",
+            "description": "Curation reward basis across the account''s pending votes; resolves to HP/VESTS outside Hivemind"
+          }
+        }
       }
     }
   },
@@ -332,6 +423,179 @@ declare
         }
       }
     },
+    "/accounts/{account-name}/pending-author-rewards": {
+      "get": {
+        "tags": [
+          "blog_api"
+        ],
+        "summary": "Get pending (pre-payout) author rewards for an account.",
+        "description": "Returns the aggregated pending author and beneficiary rewards across all\nof the account''s posts that have not yet reached payout (i.e. `is_paidout = false`\nand not deleted). For each unpaid post the gross pending payout is capped by\n`max_accepted_payout` and is split between the author and the beneficiaries.\nPosts that declined payout (`is_declined = true`) contribute zero.\nThe response intentionally does not expose final HBD/HIVE/VESTS payout\nassets. Hivemind does not have exact HBD print-rate and reward-vesting\nstate, so the endpoint returns only HBD-denominated reward basis values\nsplit into liquid, vesting, and direct buckets.\n\nSQL example\n* `SELECT * FROM hivemind_endpoints.get_account_pending_author_rewards(''blocktrades'');`\n\nREST call example\n* `GET ''https://%1$s/hivemind-api/accounts/blocktrades/pending-author-rewards''`\n",
+        "operationId": "hivemind_endpoints.get_account_pending_author_rewards",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account-name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Account to get pending author rewards for."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Aggregated pending author rewards.\n\n* Returns `hivemind_endpoints.pending_author_rewards`\n",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/hivemind_endpoints.pending_author_rewards"
+                },
+                "example": {
+                  "account": "blocktrades",
+                  "pending_post_count": 1,
+                  "gross_reward_basis": {
+                    "amount": "2000",
+                    "precision": 3,
+                    "nai": "@@000000013"
+                  },
+                  "author_reward_basis": {
+                    "liquid": {
+                      "amount": "500",
+                      "precision": 3,
+                      "nai": "@@000000013"
+                    },
+                    "vesting": {
+                      "amount": "500",
+                      "precision": 3,
+                      "nai": "@@000000013"
+                    },
+                    "direct": {
+                      "amount": "0",
+                      "precision": 3,
+                      "nai": "@@000000013"
+                    },
+                    "total": {
+                      "amount": "1000",
+                      "precision": 3,
+                      "nai": "@@000000013"
+                    }
+                  },
+                  "beneficiaries_reward_basis": {
+                    "liquid": {
+                      "amount": "0",
+                      "precision": 3,
+                      "nai": "@@000000013"
+                    },
+                    "vesting": {
+                      "amount": "0",
+                      "precision": 3,
+                      "nai": "@@000000013"
+                    },
+                    "direct": {
+                      "amount": "0",
+                      "precision": 3,
+                      "nai": "@@000000013"
+                    },
+                    "total": {
+                      "amount": "0",
+                      "precision": 3,
+                      "nai": "@@000000013"
+                    }
+                  },
+                  "curators_reward_basis": {
+                    "liquid": {
+                      "amount": "0",
+                      "precision": 3,
+                      "nai": "@@000000013"
+                    },
+                    "vesting": {
+                      "amount": "1000",
+                      "precision": 3,
+                      "nai": "@@000000013"
+                    },
+                    "direct": {
+                      "amount": "0",
+                      "precision": 3,
+                      "nai": "@@000000013"
+                    },
+                    "total": {
+                      "amount": "1000",
+                      "precision": 3,
+                      "nai": "@@000000013"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such account in the database"
+          }
+        }
+      }
+    },
+    "/accounts/{account-name}/pending-curation-rewards": {
+      "get": {
+        "tags": [
+          "blog_api"
+        ],
+        "summary": "Get pending (pre-payout) curation rewards for an account.",
+        "description": "Returns the aggregated curation reward basis for the account, summed\nacross all of the account''s votes on posts that have not yet reached payout.\nOnly votes cast within the last eight chain-days (relative to the head block)\nare considered, matching the chain''s curation reward window. Posts that\ndeclined payout or disabled curation rewards contribute zero.\nCuration rewards resolve to HP/VESTS outside Hivemind. This endpoint returns\nonly the HBD-denominated reward basis, not final VESTS/HBD/HIVE payout assets.\n\nSQL example\n* `SELECT * FROM hivemind_endpoints.get_account_pending_curation_rewards(''blocktrades'');`\n\nREST call example\n* `GET ''https://%1$s/hivemind-api/accounts/blocktrades/pending-curation-rewards''`\n",
+        "operationId": "hivemind_endpoints.get_account_pending_curation_rewards",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account-name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Account to get pending curation rewards for."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Aggregated pending curation rewards.\n\n* Returns `hivemind_endpoints.pending_curation_rewards`\n",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/hivemind_endpoints.pending_curation_rewards"
+                },
+                "example": {
+                  "account": "blocktrades",
+                  "pending_vote_count": 1,
+                  "curation_reward_basis": {
+                    "liquid": {
+                      "amount": "0",
+                      "precision": 3,
+                      "nai": "@@000000013"
+                    },
+                    "vesting": {
+                      "amount": "1000",
+                      "precision": 3,
+                      "nai": "@@000000013"
+                    },
+                    "direct": {
+                      "amount": "0",
+                      "precision": 3,
+                      "nai": "@@000000013"
+                    },
+                    "total": {
+                      "amount": "1000",
+                      "precision": 3,
+                      "nai": "@@000000013"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such account in the database"
+          }
+        }
+      }
+    },
     "/blog/reblogs": {
       "get": {
         "tags": [
@@ -435,6 +699,44 @@ declare
           },
           "400": {
             "description": "Invalid parameters (missing observer or invalid sort)"
+          }
+        }
+      }
+    },
+    "/sync-status": {
+      "get": {
+        "tags": [
+          "Other"
+        ],
+        "summary": "Get hivemind''s sync status",
+        "description": "Get the last block processed by hivemind as an object containing both\nthe block number and its timestamp (UTC). This is the uniform HAF-app\nsync/health endpoint: the timestamp lets a consumer compute staleness\nwith a single call (`age = now() - last_block_time`) without needing a\nseparate head-block reference.\n`last_block_time` is null if no block has been processed yet.\nWhile the HAF instance is still in massive sync (indexes not yet\nbuilt) the call fails fast with an error rather than executing an\nunindexed lookup.\n\nSQL example\n* `SELECT hivemind_endpoints.get_sync_status();`\n\nREST call example\n* `GET ''https://%1$s/hivemind-api/sync-status''`\n",
+        "operationId": "hivemind_endpoints.get_sync_status",
+        "responses": {
+          "200": {
+            "description": "Last block processed by hivemind and its timestamp.\n\n* Returns `JSON`\n",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "x-sql-datatype": "JSON",
+                  "properties": {
+                    "last_block_num": {
+                      "type": "integer",
+                      "description": "highest block number processed by hivemind"
+                    },
+                    "last_block_time": {
+                      "type": "string",
+                      "format": "date-time",
+                      "description": "UTC timestamp of that block"
+                    }
+                  }
+                },
+                "example": {
+                  "last_block_num": 5000000,
+                  "last_block_time": "2016-09-15T19:47:21"
+                }
+              }
+            }
           }
         }
       }

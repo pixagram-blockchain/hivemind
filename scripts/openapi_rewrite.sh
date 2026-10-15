@@ -7,7 +7,7 @@ SCRIPTDIR="$( cd -- "$(dirname "$0")" >/dev/null 2>&1 || exit 1; pwd -P )"
 
 # Fetch process_openapi.py from common-ci-configuration if not available locally
 COMMON_CI_REF="${COMMON_CI_REF:-develop}"
-COMMON_CI_URL="${COMMON_CI_URL:-https://gitlab.syncad.com/hive/common-ci-configuration/-/raw/${COMMON_CI_REF}}"
+COMMON_CI_URL="${COMMON_CI_URL:-https://raw.githubusercontent.com/openhive-network/common-ci-configuration/${COMMON_CI_REF}}"
 PROCESS_OPENAPI="${SCRIPTDIR}/process_openapi.py"
 
 if [[ ! -f "$PROCESS_OPENAPI" ]]; then
@@ -28,7 +28,10 @@ ENDPOINTS_IN_ORDER="
 ../$endpoints/endpoint_schema.sql
 ../$endpoints/types/operation.sql
 ../$endpoints/accounts/get_ops_by_account.sql
-../$endpoints/blog/get_reblogs.sql"
+../$endpoints/accounts/get_account_pending_author_rewards.sql
+../$endpoints/accounts/get_account_pending_curation_rewards.sql
+../$endpoints/blog/get_reblogs.sql
+../$endpoints/other/get_sync_status.sql"
 
 
 # Function to reverse the lines
