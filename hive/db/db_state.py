@@ -474,7 +474,8 @@ class DbState:
         """
         if cls._initial_sync is None:
             last_completed = cls.db().query_one(f"SELECT last_completed_block_num FROM {SCHEMA_NAME}.hive_state")
-            cls._initial_sync = (last_completed or 0) == 0
+            # insert_seed_data() starts hive_state at last_completed_block_num = 1.
+            cls._initial_sync = (last_completed or 0) <= 1
         return cls._initial_sync
 
     @classmethod
@@ -1045,9 +1046,13 @@ WHERE table_schema = '{SCHEMA_NAME}' AND table_type = 'BASE TABLE'
             # but the reloptions persist, so always RESET them at finalization.
             cls.restore_autovacuum_after_massive_sync()
 
+            # A sync from scratch always needs the full-recompute path (community rank,
+            # payout stats, notification cache), even on a chain shorter than the
+            # threshold: Pixagram's whole chain is ~1.2M blocks, under the 2M default.
             is_initial_massive = (
-                last_imported_blocks - last_completed_blocks
-            ) > MASSIVE_WITHOUT_INDEXES_THRESHOLD_BLOCKS
+                cls.is_initial_sync()
+                or (last_imported_blocks - last_completed_blocks) > MASSIVE_WITHOUT_INDEXES_THRESHOLD_BLOCKS
+            )
 
             if is_initial_massive:
                 cls.vacuum_all_hivemind_tables_in_threads()
