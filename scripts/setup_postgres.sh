@@ -24,7 +24,7 @@ else
   echo "Fetching create_haf_app_role.sh from common-ci-configuration..."
   COMMON_CI_REF="${COMMON_CI_REF:-develop}"
   HAF_APP_ROLE_SCRIPT="/tmp/create_haf_app_role.sh"
-  curl -fsSL "https://gitlab.syncad.com/hive/common-ci-configuration/-/raw/${COMMON_CI_REF}/haf-app-tools/scripts/create_haf_app_role.sh" -o "$HAF_APP_ROLE_SCRIPT"
+  curl -fsSL "https://raw.githubusercontent.com/openhive-network/common-ci-configuration/${COMMON_CI_REF}/haf-app-tools/scripts/create_haf_app_role.sh" -o "$HAF_APP_ROLE_SCRIPT"
   chmod +x "$HAF_APP_ROLE_SCRIPT"
 fi
 

@@ -7,7 +7,7 @@ SCRIPTDIR="$( cd -- "$(dirname "$0")" >/dev/null 2>&1 || exit 1; pwd -P )"
 
 # Fetch process_openapi.py from common-ci-configuration if not available locally
 COMMON_CI_REF="${COMMON_CI_REF:-develop}"
-COMMON_CI_URL="${COMMON_CI_URL:-https://gitlab.syncad.com/hive/common-ci-configuration/-/raw/${COMMON_CI_REF}}"
+COMMON_CI_URL="${COMMON_CI_URL:-https://raw.githubusercontent.com/openhive-network/common-ci-configuration/${COMMON_CI_REF}}"
 PROCESS_OPENAPI="${SCRIPTDIR}/process_openapi.py"
 
 if [[ ! -f "$PROCESS_OPENAPI" ]]; then
