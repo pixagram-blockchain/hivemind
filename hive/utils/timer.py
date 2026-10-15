@@ -87,19 +87,25 @@ class Timer:
             out += f"eta {self._eta()}"
         else:
             total_time = self._laps[-1] - self._start_time
-            out += f"done in {secs_to_str(total_time)}, avg rate: {self._total / total_time:.1f}/s"
+            avg_rate = self._total / total_time if total_time > 0 else 0
+            out += f"done in {secs_to_str(total_time)}, avg rate: {avg_rate:.1f}/s"
 
         return out
 
     def _rate(self, lap_idx=None):
         """Get the rate of last batch's lap_idx, pass None for overall."""
         secs = self._elapsed(lap_idx)
-        return self._last_items / secs
+        # Two back-to-back laps can read the same value on a coarse clock (e.g. the
+        # Xen clocksource), and a status line must never abort a sync.
+        return self._last_items / secs if secs > 0 else 0
 
     def _eta(self):
         """Time to finish, based on most recent batch."""
+        rate = self._rate()
+        if not rate:
+            return "unknown"
         left = self._full_total - self._processed
-        secs = left / self._rate()
+        secs = left / rate
         return secs_to_str(secs)
 
     def _elapsed(self, lap_idx=None):
